@@ -11,3 +11,4 @@ glam = "0.24"
 pollster = "0.3"
 log = "0.4"
 env_logger = "0.10"
+bytemuck = { version = "1.13", features = ["derive"] }
