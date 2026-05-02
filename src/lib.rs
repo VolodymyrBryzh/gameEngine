@@ -7,6 +7,63 @@ use winit::{
 use std::collections::HashSet;
 use glam::{Vec3, Mat4};
 use wgpu::util::DeviceExt;
+use rapier3d::prelude::*;
+
+// --- Фізичний контекст ---
+
+pub struct PhysicsContext {
+    pub rigid_body_set: RigidBodySet,
+    pub collider_set: ColliderSet,
+    pub integration_parameters: IntegrationParameters,
+    pub physics_pipeline: PhysicsPipeline,
+    pub island_manager: IslandManager,
+    pub broad_phase: BroadPhase,
+    pub narrow_phase: NarrowPhase,
+    pub impulse_joint_set: ImpulseJointSet,
+    pub multibody_joint_set: MultibodyJointSet,
+    pub ccd_solver: CCDSolver,
+    pub gravity: Vector<f32>,
+    pub physics_hooks: (),
+    pub event_handler: (),
+}
+
+impl PhysicsContext {
+    pub fn new() -> Self {
+        Self {
+            rigid_body_set: RigidBodySet::new(),
+            collider_set: ColliderSet::new(),
+            integration_parameters: IntegrationParameters::default(),
+            physics_pipeline: PhysicsPipeline::new(),
+            island_manager: IslandManager::new(),
+            broad_phase: BroadPhase::new(),
+            narrow_phase: NarrowPhase::new(),
+            impulse_joint_set: ImpulseJointSet::new(),
+            multibody_joint_set: MultibodyJointSet::new(),
+            ccd_solver: CCDSolver::new(),
+            gravity: vector![0.0, -9.81, 0.0],
+            physics_hooks: (),
+            event_handler: (),
+        }
+    }
+
+    pub fn step(&mut self) {
+        self.physics_pipeline.step(
+            &self.gravity,
+            &self.integration_parameters,
+            &mut self.island_manager,
+            &mut self.broad_phase,
+            &mut self.narrow_phase,
+            &mut self.rigid_body_set,
+            &mut self.collider_set,
+            &mut self.impulse_joint_set,
+            &mut self.multibody_joint_set,
+            &mut self.ccd_solver,
+            None,
+            &self.physics_hooks,
+            &self.event_handler,
+        );
+    }
+}
 
 // --- Графічні типи ---
 
@@ -38,7 +95,6 @@ impl Vertex {
     }
 }
 
-// Дані нашого куба
 const VERTICES: &[Vertex] = &[
     Vertex { position: [-0.5, -0.5,  0.5], color: [0.9, 0.1, 0.1] },
     Vertex { position: [ 0.5, -0.5,  0.5], color: [0.1, 0.9, 0.1] },
@@ -51,12 +107,12 @@ const VERTICES: &[Vertex] = &[
 ];
 
 const INDICES: &[u16] = &[
-    0, 1, 2, 2, 3, 0, // front
-    1, 5, 6, 6, 2, 1, // right
-    5, 4, 7, 7, 6, 5, // back
-    4, 0, 3, 3, 7, 4, // left
-    3, 2, 6, 6, 7, 3, // top
-    4, 5, 1, 1, 0, 4, // bottom
+    0, 1, 2, 2, 3, 0,
+    1, 5, 6, 6, 2, 1,
+    5, 4, 7, 7, 6, 5,
+    4, 0, 3, 3, 7, 4,
+    3, 2, 6, 6, 7, 3,
+    4, 5, 1, 1, 0, 4,
 ];
 
 // --- Камера ---
@@ -99,7 +155,7 @@ impl CameraUniform {
 
 // --- Компоненти нашого ECS ---
 
-pub struct Position(pub Vec3);
+pub struct RigidBodyHandle(pub rapier3d::dynamics::RigidBodyHandle);
 pub struct Player;
 
 // --- Система введення ---
@@ -151,6 +207,7 @@ pub struct Engine {
 
     pub world: hecs::World,
     pub input: InputState,
+    pub physics: PhysicsContext,
 }
 
 impl Engine {
@@ -197,9 +254,9 @@ impl Engine {
         };
         surface.configure(&device, &config);
 
-        // --- Камера та Uniforms ---
+        // --- Камера ---
         let camera = Camera {
-            eye: (0.0, 1.0, 2.0).into(),
+            eye: (0.0, 5.0, 10.0).into(),
             target: (0.0, 0.0, 0.0).into(),
             up: Vec3::Y,
             aspect: config.width as f32 / config.height as f32,
@@ -220,35 +277,30 @@ impl Engine {
         );
 
         let camera_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                }
-            ],
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
             label: Some("camera_bind_group_layout"),
         });
 
         let camera_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             layout: &camera_bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: camera_buffer.as_entire_binding(),
-                }
-            ],
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: camera_buffer.as_entire_binding(),
+            }],
             label: Some("camera_bind_group"),
         });
 
-        // --- Pipeline та Шейдери ---
+        // --- Pipeline ---
         let shader = device.create_shader_module(wgpu::include_wgsl!("shader.wgsl"));
-
         let render_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Render Pipeline Layout"),
             bind_group_layouts: &[&camera_bind_group_layout],
@@ -274,47 +326,47 @@ impl Engine {
             }),
             primitive: wgpu::PrimitiveState {
                 topology: wgpu::PrimitiveTopology::TriangleList,
-                strip_index_format: None,
                 front_face: wgpu::FrontFace::Ccw,
                 cull_mode: Some(wgpu::Face::Back),
-                polygon_mode: wgpu::PolygonMode::Fill,
-                unclipped_depth: false,
-                conservative: false,
+                ..Default::default()
             },
             depth_stencil: None,
-            multisample: wgpu::MultisampleState {
-                count: 1,
-                mask: !0,
-                alpha_to_coverage_enabled: false,
-            },
+            multisample: wgpu::MultisampleState::default(),
             multiview: None,
         });
 
-        // --- Буфери Геометрії ---
-        let vertex_buffer = device.create_buffer_init(
-            &wgpu::util::BufferInitDescriptor {
-                label: Some("Vertex Buffer"),
-                contents: bytemuck::cast_slice(VERTICES),
-                usage: wgpu::BufferUsages::VERTEX,
-            }
-        );
+        let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Vertex Buffer"),
+            contents: bytemuck::cast_slice(VERTICES),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
 
-        let index_buffer = device.create_buffer_init(
-            &wgpu::util::BufferInitDescriptor {
-                label: Some("Index Buffer"),
-                contents: bytemuck::cast_slice(INDICES),
-                usage: wgpu::BufferUsages::INDEX,
-            }
-        );
-        let num_indices = INDICES.len() as u32;
+        let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Index Buffer"),
+            contents: bytemuck::cast_slice(INDICES),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+
+        // --- Ініціалізація Фізики ---
+        let mut physics = PhysicsContext::new();
+
+        // Додаємо землю (статичний коллайдер)
+        let ground_collider = ColliderBuilder::cuboid(100.0, 0.1, 100.0)
+            .translation(vector![0.0, -1.0, 0.0])
+            .build();
+        physics.collider_set.insert(ground_collider);
+
+        // Додаємо гравця (динамічне тіло)
+        let rigid_body = RigidBodyBuilder::dynamic()
+            .translation(vector![0.0, 10.0, 0.0]) // Починаємо високо в небі
+            .lock_translations() // Поки що заблокуємо, щоб просто впав
+            .build();
+        let handle = physics.rigid_body_set.insert(rigid_body);
+        let collider = ColliderBuilder::cuboid(0.5, 0.5, 0.5).build();
+        physics.collider_set.insert_with_parent(collider, handle, &mut physics.rigid_body_set);
 
         let mut world = hecs::World::new();
-        let input = InputState::new();
-
-        world.spawn((
-            Player,
-            Position(Vec3::ZERO),
-        ));
+        world.spawn((Player, RigidBodyHandle(handle)));
 
         Self {
             window,
@@ -326,13 +378,14 @@ impl Engine {
             render_pipeline,
             vertex_buffer,
             index_buffer,
-            num_indices,
+            num_indices: INDICES.len() as u32,
             camera,
             camera_uniform,
             camera_buffer,
             camera_bind_group,
             world,
-            input,
+            input: InputState::new(),
+            physics,
         }
     }
 
@@ -346,29 +399,20 @@ impl Engine {
         }
     }
 
-    pub fn handle_window_event(&mut self, event: &WindowEvent) -> bool {
-        self.input.update(event);
-        false
-    }
-
     pub fn update(&mut self) {
-        let speed = 0.05;
-        let mut move_dir = Vec3::ZERO;
+        // Крок фізики
+        self.physics.step();
 
-        if self.input.is_key_pressed(KeyCode::KeyW) { move_dir.z -= 1.0; }
-        if self.input.is_key_pressed(KeyCode::KeyS) { move_dir.z += 1.0; }
-        if self.input.is_key_pressed(KeyCode::KeyA) { move_dir.x -= 1.0; }
-        if self.input.is_key_pressed(KeyCode::KeyD) { move_dir.x += 1.0; }
-
-        if move_dir.length() > 0.0 {
-            move_dir = move_dir.normalize();
+        // Синхронізація камери з фізичним тілом гравця
+        for (_id, (_player, handle)) in self.world.query_mut::<(&Player, &RigidBodyHandle)>() {
+            let body = &self.physics.rigid_body_set[handle.0];
+            let pos = body.translation();
+            
+            // Камера слідує за гравцем
+            self.camera.target = Vec3::new(pos.x, pos.y, pos.z);
+            self.camera.eye = self.camera.target + Vec3::new(0.0, 5.0, 10.0);
         }
 
-        // Рухаємо камеру замість гравця, щоб побачити рух у 3D
-        self.camera.eye += move_dir * speed;
-        self.camera.target += move_dir * speed;
-
-        // Оновлюємо Uniform буфер камери
         self.camera_uniform.update_view_proj(&self.camera);
         self.queue.write_buffer(&self.camera_buffer, 0, bytemuck::cast_slice(&[self.camera_uniform]));
     }
@@ -397,15 +441,21 @@ impl Engine {
                     },
                 })],
                 depth_stencil_attachment: None,
-                occlusion_query_set: None,
-                timestamp_writes: None,
+                ..Default::default()
             });
 
             render_pass.set_pipeline(&self.render_pipeline);
             render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
             render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
             render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
-            render_pass.draw_indexed(0..self.num_indices, 0, 0..1);
+            
+            // Малюємо куб для кожної фізичної сутності (поки що тільки одна)
+            for (_id, handle) in self.world.query_mut::<&RigidBodyHandle>() {
+                let body = &self.physics.rigid_body_set[handle.0];
+                let _pos = body.translation();
+                // Тут ми маємо передавати матрицю моделі в шейдер, але для тесту камера вже слідує за тілом
+                render_pass.draw_indexed(0..self.num_indices, 0, 0..1);
+            }
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));
@@ -418,49 +468,28 @@ impl Engine {
 pub async fn run() {
     env_logger::init();
     let event_loop = EventLoop::new().unwrap();
-    let window = WindowBuilder::new()
-        .with_title("Unique 3D Engine")
-        .build(&event_loop)
-        .unwrap();
-
+    let window = WindowBuilder::new().with_title("Survival Engine 3D").build(&event_loop).unwrap();
     let mut engine = Engine::new(window).await;
 
     let _ = event_loop.run(move |event, elwt| {
         match event {
-            Event::WindowEvent {
-                ref event,
-                window_id,
-            } if window_id == engine.window.id() => {
-                if !engine.handle_window_event(event) {
-                    match event {
-                        WindowEvent::CloseRequested
-                        | WindowEvent::KeyboardInput {
-                            event: KeyEvent {
-                                state: ElementState::Pressed,
-                                physical_key: PhysicalKey::Code(KeyCode::Escape),
-                                ..
-                            },
-                            ..
-                        } => elwt.exit(),
-                        WindowEvent::Resized(physical_size) => {
-                            engine.resize(*physical_size);
+            Event::WindowEvent { ref event, window_id } if window_id == engine.window.id() => {
+                match event {
+                    WindowEvent::CloseRequested => elwt.exit(),
+                    WindowEvent::Resized(physical_size) => engine.resize(*physical_size),
+                    WindowEvent::RedrawRequested => {
+                        engine.update();
+                        match engine.render() {
+                            Ok(_) => {}
+                            Err(wgpu::SurfaceError::Lost) => engine.resize(engine.size),
+                            Err(wgpu::SurfaceError::OutOfMemory) => elwt.exit(),
+                            Err(e) => eprintln!("{:?}", e),
                         }
-                        WindowEvent::RedrawRequested => {
-                            engine.update();
-                            match engine.render() {
-                                Ok(_) => {}
-                                Err(wgpu::SurfaceError::Lost) => engine.resize(engine.size),
-                                Err(wgpu::SurfaceError::OutOfMemory) => elwt.exit(),
-                                Err(e) => eprintln!("{:?}", e),
-                            }
-                        }
-                        _ => {}
                     }
+                    _ => {}
                 }
             }
-            Event::AboutToWait => {
-                engine.window.request_redraw();
-            }
+            Event::AboutToWait => engine.window.request_redraw(),
             _ => {}
         }
     });
