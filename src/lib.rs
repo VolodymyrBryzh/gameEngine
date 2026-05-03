@@ -7,22 +7,28 @@ use winit::{
 use std::collections::HashSet;
 use glam::{Vec3, Mat4};
 use wgpu::util::DeviceExt;
-use rapier3d::prelude::*;
+use noise::{NoiseFn, Perlin};
+use instant::Instant;
 
 // --- Типи ---
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
-pub struct Vertex { position: [f32; 3], color: [f32; 3] }
+pub struct Vertex { 
+    position: [f32; 3], 
+    color: [f32; 3],
+    normal: [f32; 3],
+}
 
 impl Vertex {
     fn desc() -> wgpu::VertexBufferLayout<'static> {
         wgpu::VertexBufferLayout {
-            array_stride: 24,
+            array_stride: 36,
             step_mode: wgpu::VertexStepMode::Vertex,
             attributes: &[
                 wgpu::VertexAttribute { offset: 0, shader_location: 0, format: wgpu::VertexFormat::Float32x3 },
                 wgpu::VertexAttribute { offset: 12, shader_location: 1, format: wgpu::VertexFormat::Float32x3 },
+                wgpu::VertexAttribute { offset: 24, shader_location: 2, format: wgpu::VertexFormat::Float32x3 },
             ],
         }
     }
@@ -30,22 +36,7 @@ impl Vertex {
 
 pub struct Camera {
     pub eye: Vec3, pub target: Vec3, pub up: Vec3,
-    pub aspect: f32, pub fovy: f32, pub znear: f32, pub zfar: f32,
-    pub yaw: f32, pub pitch: f32, pub distance: f32,
-}
-
-impl Camera {
-    fn update_position(&mut self, target: Vec3) {
-        self.target = target;
-        let p_rad = self.pitch.to_radians();
-        let y_rad = self.yaw.to_radians();
-        let h_dist = self.distance * p_rad.cos();
-        let v_dist = self.distance * p_rad.sin();
-        self.eye = Vec3::new(target.x - h_dist * y_rad.cos(), target.y - h_dist * y_rad.sin(), target.z + v_dist);
-    }
-    fn build_matrix(&self) -> Mat4 {
-        Mat4::perspective_rh(self.fovy.to_radians(), self.aspect, self.znear, self.zfar) * Mat4::look_at_rh(self.eye, self.target, self.up)
-    }
+    pub aspect: f32, pub fovy: f32, pub yaw: f32, pub pitch: f32,
 }
 
 pub struct Engine {
@@ -55,14 +46,24 @@ pub struct Engine {
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
     render_pipeline: wgpu::RenderPipeline,
-    cube_vb: wgpu::Buffer, cube_ib: wgpu::Buffer, num_cube_idx: u32,
+    depth_view: wgpu::TextureView,
+    msaa_view: wgpu::TextureView, // ДОДАНО ДЛЯ MSAA
+    
+    cube_vb: wgpu::Buffer, num_cube_verts: u32,
+    terrain_vb: wgpu::Buffer, terrain_ib: wgpu::Buffer, num_terrain_idx: u32,
+    water_vb: wgpu::Buffer,
+
     pub camera: Camera,
     camera_buf: wgpu::Buffer, camera_bg: wgpu::BindGroup,
     model_buf: wgpu::Buffer, model_bg: wgpu::BindGroup,
+
     pub input: HashSet<KeyCode>,
     pub mouse_delta: (f32, f32),
-    pub rigid_body_set: RigidBodySet,
-    pub player_handle: RigidBodyHandle,
+    pub player_pos: Vec3,
+    pub player_vel: Vec3,
+    pub perlin: Perlin,
+    start_time: Instant,
+    last_frame: Instant,
 }
 
 impl Engine {
@@ -79,13 +80,23 @@ impl Engine {
         let config = surface.get_default_config(&adapter, size.width, size.height).unwrap();
         surface.configure(&device, &config);
 
-        let camera = Camera {
-            eye: Vec3::new(0.0, -30.0, 30.0), target: Vec3::ZERO, up: Vec3::Z,
-            aspect: config.width as f32 / config.height as f32, fovy: 45.0, znear: 0.1, zfar: 1000.0,
-            yaw: 90.0, pitch: 30.0, distance: 50.0,
-        };
-        let camera_buf = device.create_buffer(&wgpu::BufferDescriptor { label: None, size: 64, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
-        let camera_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { entries: &[wgpu::BindGroupLayoutEntry { binding: 0, visibility: wgpu::ShaderStages::VERTEX, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None }, count: None }], label: None });
+        // MSAA & Depth
+        let msaa_tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: None, size: wgpu::Extent3d { width: config.width, height: config.height, depth_or_array_layers: 1 },
+            mip_level_count: 1, sample_count: 4, dimension: wgpu::TextureDimension::D2, format: config.format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT, view_formats: &[],
+        });
+        let msaa_view = msaa_tex.create_view(&wgpu::TextureViewDescriptor::default());
+
+        let depth_tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: None, size: wgpu::Extent3d { width: config.width, height: config.height, depth_or_array_layers: 1 },
+            mip_level_count: 1, sample_count: 4, dimension: wgpu::TextureDimension::D2, format: wgpu::TextureFormat::Depth32Float,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT, view_formats: &[],
+        });
+        let depth_view = depth_tex.create_view(&wgpu::TextureViewDescriptor::default());
+
+        let camera_buf = device.create_buffer(&wgpu::BufferDescriptor { label: None, size: 96, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+        let camera_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { entries: &[wgpu::BindGroupLayoutEntry { binding: 0, visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None }, count: None }], label: None });
         let camera_bg = device.create_bind_group(&wgpu::BindGroupDescriptor { layout: &camera_bgl, entries: &[wgpu::BindGroupEntry { binding: 0, resource: camera_buf.as_entire_binding() }], label: None });
         let model_buf = device.create_buffer(&wgpu::BufferDescriptor { label: None, size: 64, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
         let model_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { entries: &[wgpu::BindGroupLayoutEntry { binding: 0, visibility: wgpu::ShaderStages::VERTEX, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None }, count: None }], label: None });
@@ -98,99 +109,157 @@ impl Engine {
             vertex: wgpu::VertexState { module: &shader, entry_point: "vs_main", buffers: &[Vertex::desc()] },
             fragment: Some(wgpu::FragmentState { module: &shader, entry_point: "fs_main", targets: &[Some(wgpu::ColorTargetState { format: config.format, blend: Some(wgpu::BlendState::REPLACE), write_mask: wgpu::ColorWrites::ALL })] }),
             primitive: wgpu::PrimitiveState { cull_mode: Some(wgpu::Face::Back), ..Default::default() },
-            depth_stencil: None, multisample: wgpu::MultisampleState::default(), multiview: None,
+            depth_stencil: Some(wgpu::DepthStencilState { format: wgpu::TextureFormat::Depth32Float, depth_write_enabled: true, depth_compare: wgpu::CompareFunction::Less, stencil: wgpu::StencilState::default(), bias: wgpu::DepthBiasState::default() }),
+            multisample: wgpu::MultisampleState { count: 4, mask: !0, alpha_to_coverage_enabled: false },
+            multiview: None,
         });
 
-        let cube_verts = &[
-            Vertex { position: [-0.5, -0.5,  0.5], color: [1.0, 0.0, 0.0] }, Vertex { position: [ 0.5, -0.5,  0.5], color: [0.0, 1.0, 0.0] },
-            Vertex { position: [ 0.5,  0.5,  0.5], color: [0.0, 0.0, 1.0] }, Vertex { position: [-0.5,  0.5,  0.5], color: [1.0, 1.0, 0.0] },
-            Vertex { position: [-0.5, -0.5, -0.5], color: [1.0, 0.0, 1.0] }, Vertex { position: [ 0.5, -0.5, -0.5], color: [0.0, 1.0, 1.0] },
-            Vertex { position: [ 0.5,  0.5, -0.5], color: [1.0, 1.0, 1.0] }, Vertex { position: [-0.5,  0.5, -0.5], color: [0.5, 0.5, 0.5] },
+        // Меші
+        let mut cube_v = Vec::new();
+        let faces = [
+            ([0,0,1], [[-1,-1,1],[1,-1,1],[1,1,1],[-1,1,1]]), ([0,0,-1], [[-1,1,-1],[1,1,-1],[1,-1,-1],[-1,-1,-1]]),
+            ([0,1,0], [[-1,1,1],[1,1,1],[1,1,-1],[-1,1,-1]]), ([0,-1,0], [[-1,-1,-1],[1,-1,-1],[1,-1,1],[-1,-1,1]]),
+            ([1,0,0], [[1,-1,1],[1,-1,-1],[1,1,-1],[1,1,1]]), ([-1,0,0], [[-1,-1,-1],[-1,-1,1],[-1,1,1],[-1,1,-1]]),
         ];
-        let cube_idx: &[u16] = &[0, 1, 2, 2, 3, 0, 1, 5, 6, 6, 2, 1, 5, 4, 7, 7, 6, 5, 4, 0, 3, 3, 7, 4, 3, 2, 6, 6, 7, 3, 4, 5, 1, 1, 0, 4];
-        let cube_vb = device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: None, contents: bytemuck::cast_slice(cube_verts), usage: wgpu::BufferUsages::VERTEX });
-        let cube_ib = device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: None, contents: bytemuck::cast_slice(cube_idx), usage: wgpu::BufferUsages::INDEX });
+        for (n, quad) in faces {
+            let color = [0.8, 0.3, 0.2];
+            let n_f = [n[0] as f32, n[1] as f32, n[2] as f32];
+            let v0 = Vertex { position: [quad[0][0] as f32 * 0.5, quad[0][1] as f32 * 0.5, quad[0][2] as f32 * 0.5], color, normal: n_f };
+            let v1 = Vertex { position: [quad[1][0] as f32 * 0.5, quad[1][1] as f32 * 0.5, quad[1][2] as f32 * 0.5], color, normal: n_f };
+            let v2 = Vertex { position: [quad[2][0] as f32 * 0.5, quad[2][1] as f32 * 0.5, quad[2][2] as f32 * 0.5], color, normal: n_f };
+            let v3 = Vertex { position: [quad[3][0] as f32 * 0.5, quad[3][1] as f32 * 0.5, quad[3][2] as f32 * 0.5], color, normal: n_f };
+            cube_v.extend_from_slice(&[v0, v1, v2, v0, v2, v3]);
+        }
+        let cube_vb = device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: None, contents: bytemuck::cast_slice(&cube_v), usage: wgpu::BufferUsages::VERTEX });
 
-        let mut rigid_body_set = RigidBodySet::new();
-        let rb = RigidBodyBuilder::dynamic().translation(vector![0.0, 0.0, 40.0]).lock_rotations().build();
-        let player_handle = rigid_body_set.insert(rb);
+        let mut terrain_verts = Vec::new(); let mut terrain_idx = Vec::new();
+        let t_size = 500.0; let t_res = 130;
+        let perlin = Perlin::new(42);
+        for y in 0..t_res {
+            for x in 0..t_res {
+                let fx = (x as f32 / (t_res-1) as f32) * t_size - t_size / 2.0;
+                let fy = (y as f32 / (t_res-1) as f32) * t_size - t_size / 2.0;
+                let h = perlin.get([fx as f64 * 0.01, fy as f64 * 0.01]) as f32 * 25.0;
+                let h_x = perlin.get([(fx+0.5) as f64 * 0.01, fy as f64 * 0.01]) as f32 * 25.0;
+                let h_y = perlin.get([fx as f64 * 0.01, (fy+0.5) as f64 * 0.01]) as f32 * 25.0;
+                let normal = Vec3::new(h - h_x, h - h_y, 0.5).normalize();
+                let color = if h > 15.0 { [0.9, 0.9, 0.9] } else if h < 0.5 { [0.7, 0.65, 0.5] } else { [0.25, 0.5, 0.25] };
+                terrain_verts.push(Vertex { position: [fx, fy, h], color, normal: normal.into() });
+            }
+        }
+        for y in 0..t_res - 1 {
+            for x in 0..t_res - 1 {
+                let i = (y * t_res + x) as u16;
+                terrain_idx.extend_from_slice(&[i, i + t_res as u16, i + 1, i + 1, i + t_res as u16, i + t_res as u16 + 1]);
+            }
+        }
+        let terrain_vb = device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: None, contents: bytemuck::cast_slice(&terrain_verts), usage: wgpu::BufferUsages::VERTEX });
+        let terrain_ib = device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: None, contents: bytemuck::cast_slice(&terrain_idx), usage: wgpu::BufferUsages::INDEX });
 
+        let mut water_v = Vec::new();
+        let w_res = 80; let w_size = 1000.0;
+        for y in 0..w_res {
+            for x in 0..w_res {
+                let fx = (x as f32 / (w_res-1) as f32) * w_size - w_size / 2.0;
+                let fy = (y as f32 / (w_res-1) as f32) * w_size - w_size / 2.0;
+                water_v.push(Vertex { position: [fx, fy, -2.5], color: [0.1, 0.3, 0.6], normal: [0.0,0.0,1.0] });
+            }
+        }
+        let water_vb = device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: None, contents: bytemuck::cast_slice(&water_v), usage: wgpu::BufferUsages::VERTEX });
+
+        let aspect = config.width as f32 / config.height as f32;
         Self {
-            window, surface, device, queue, config, render_pipeline,
-            cube_vb, cube_ib, num_cube_idx: cube_idx.len() as u32,
-            camera, camera_buf, camera_bg, model_buf, model_bg,
+            window, surface, device, queue, config, render_pipeline, depth_view, msaa_view,
+            cube_vb, num_cube_verts: cube_v.len() as u32,
+            terrain_vb, terrain_ib, num_terrain_idx: terrain_idx.len() as u32,
+            water_vb,
+            camera: Camera { eye: Vec3::ZERO, target: Vec3::ZERO, up: Vec3::Z, aspect, fovy: 45.0, yaw: 90.0, pitch: 30.0 },
+            camera_buf, camera_bg, model_buf, model_bg,
             input: HashSet::new(), mouse_delta: (0.0, 0.0),
-            rigid_body_set, player_handle,
+            player_pos: Vec3::new(0.0, 0.0, 50.0), player_vel: Vec3::ZERO,
+            perlin, start_time: Instant::now(), last_frame: Instant::now(),
         }
     }
 
     pub fn update(&mut self) {
-        let dt = 1.0 / 60.0;
-        let gravity = vector![0.0, 0.0, -9.81];
+        let dt = self.last_frame.elapsed().as_secs_f32().min(0.033);
+        let time = self.start_time.elapsed().as_secs_f32();
+        self.last_frame = Instant::now();
 
-        self.camera.yaw += self.mouse_delta.0 * 0.15;
-        self.camera.pitch = (self.camera.pitch - self.mouse_delta.1 * 0.15).clamp(5.0, 85.0);
+        self.camera.yaw += self.mouse_delta.0 * 0.12;
+        self.camera.pitch = (self.camera.pitch - self.mouse_delta.1 * 0.12).clamp(5.0, 85.0);
         self.mouse_delta = (0.0, 0.0);
 
-        let body = self.rigid_body_set.get_mut(self.player_handle).unwrap();
+        self.player_vel.z += -40.0 * dt;
         let mut move_dir = Vec3::ZERO;
         let y_rad = self.camera.yaw.to_radians();
-        let forward = Vec3::new(y_rad.cos(), y_rad.sin(), 0.0).normalize();
-        let right = Vec3::new(y_rad.sin(), -y_rad.cos(), 0.0).normalize();
-
-        if self.input.contains(&KeyCode::KeyW) { move_dir += forward; }
-        if self.input.contains(&KeyCode::KeyS) { move_dir -= forward; }
-        if self.input.contains(&KeyCode::KeyA) { move_dir += right; }
-        if self.input.contains(&KeyCode::KeyD) { move_dir -= right; }
-
-        let mut vel = *body.linvel();
-        vel += gravity * dt;
-        
+        let fwd = Vec3::new(y_rad.cos(), y_rad.sin(), 0.0).normalize();
+        let rgt = Vec3::new(y_rad.sin(), -y_rad.cos(), 0.0).normalize();
+        if self.input.contains(&KeyCode::KeyW) { move_dir += fwd; }
+        if self.input.contains(&KeyCode::KeyS) { move_dir -= fwd; }
+        if self.input.contains(&KeyCode::KeyA) { move_dir += rgt; }
+        if self.input.contains(&KeyCode::KeyD) { move_dir -= rgt; }
         if move_dir.length() > 0.0 {
-            let v = move_dir.normalize() * 20.0;
-            vel.x = v.x; vel.y = v.y;
+            let v = move_dir.normalize() * 22.0;
+            self.player_vel.x = v.x; self.player_vel.y = v.y;
         } else {
-            vel.x = 0.0; vel.y = 0.0;
+            self.player_vel.x *= 0.8; self.player_vel.y *= 0.8;
         }
 
-        if self.input.contains(&KeyCode::Space) && vel.z.abs() < 0.1 {
-            vel.z = 15.0;
+        self.player_pos += self.player_vel * dt;
+        let gh = self.perlin.get([self.player_pos.x as f64 * 0.01, self.player_pos.y as f64 * 0.01]) as f32 * 25.0;
+        if self.player_pos.z < gh + 1.0 {
+            self.player_pos.z = gh + 1.0;
+            if self.player_vel.z < 0.0 { self.player_vel.z = 0.0; }
+        }
+        if self.input.contains(&KeyCode::Space) && (self.player_pos.z - gh - 1.0).abs() < 0.2 {
+            self.player_vel.z = 18.0;
         }
 
-        body.set_linvel(vel, true);
+        let p_rad = self.camera.pitch.to_radians();
+        let y_rad = self.camera.yaw.to_radians();
+        let dist = 35.0;
+        self.camera.eye = Vec3::new(self.player_pos.x - dist * p_rad.cos() * y_rad.cos(), self.player_pos.y - dist * p_rad.cos() * y_rad.sin(), self.player_pos.z + dist * p_rad.sin());
+        let vm = Mat4::perspective_rh(self.camera.fovy.to_radians(), self.camera.aspect, 0.1, 4000.0) * Mat4::look_at_rh(self.camera.eye, self.player_pos, self.camera.up);
         
-        // РУЧНА ІНТЕГРАЦІЯ ПОЗИЦІЇ
-        let old_pos = *body.translation();
-        let new_pos = old_pos + body.linvel() * dt;
-        body.set_translation(new_pos, true);
-
-        self.camera.update_position(Vec3::new(new_pos.x, new_pos.y, new_pos.z));
-        self.window.set_title(&format!("Z: {:.2}", new_pos.z));
-
-        let camera_matrix = self.camera.build_matrix();
-        self.queue.write_buffer(&self.camera_buf, 0, bytemuck::cast_slice(&[camera_matrix.to_cols_array_2d()]));
+        let mut cam_data = [0.0f32; 24];
+        cam_data[0..16].copy_from_slice(&vm.to_cols_array());
+        cam_data[16..19].copy_from_slice(&self.camera.eye.to_array());
+        cam_data[20] = time;
+        self.queue.write_buffer(&self.camera_buf, 0, bytemuck::cast_slice(&cam_data));
     }
 
     pub fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
-        let output = self.surface.get_current_texture()?;
-        let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+        let out = self.surface.get_current_texture()?;
+        let view = out.texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let mut enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
         {
-            let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment { view: &view, resolve_target: None, ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.1, g: 0.2, b: 0.3, a: 1.0 }), store: wgpu::StoreOp::Store } })], ..Default::default()
+            let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment { 
+                    view: &self.msaa_view, 
+                    resolve_target: Some(&view), 
+                    ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.5, g: 0.7, b: 0.9, a: 1.0 }), store: wgpu::StoreOp::Store } 
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment { view: &self.depth_view, depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Store }), stencil_ops: None }),
+                ..Default::default()
             });
             rp.set_pipeline(&self.render_pipeline);
             rp.set_bind_group(0, &self.camera_bg, &[]);
-            let pos = self.rigid_body_set.get(self.player_handle).unwrap().translation();
-            let m = Mat4::from_translation(Vec3::new(pos.x, pos.y, pos.z));
+            self.queue.write_buffer(&self.model_buf, 0, bytemuck::cast_slice(&[Mat4::IDENTITY.to_cols_array_2d()]));
+            rp.set_bind_group(1, &self.model_bg, &[]);
+            rp.set_vertex_buffer(0, self.water_vb.slice(..));
+            rp.draw(0..6400, 0..1); // 80x80 grid
+            rp.set_vertex_buffer(0, self.terrain_vb.slice(..));
+            rp.set_index_buffer(self.terrain_ib.slice(..), wgpu::IndexFormat::Uint16);
+            rp.draw_indexed(0..self.num_terrain_idx, 0, 0..1);
+            let m = Mat4::from_translation(self.player_pos);
             self.queue.write_buffer(&self.model_buf, 0, bytemuck::cast_slice(&[m.to_cols_array_2d()]));
             rp.set_bind_group(1, &self.model_bg, &[]);
             rp.set_vertex_buffer(0, self.cube_vb.slice(..));
-            rp.set_index_buffer(self.cube_ib.slice(..), wgpu::IndexFormat::Uint16);
-            rp.draw_indexed(0..self.num_cube_idx, 0, 0..1);
+            rp.draw(0..self.num_cube_verts, 0..1);
         }
-        self.queue.submit(std::iter::once(encoder.finish()));
-        output.present(); Ok(())
+        self.queue.submit(std::iter::once(enc.finish()));
+        out.present(); Ok(())
     }
 }
 
