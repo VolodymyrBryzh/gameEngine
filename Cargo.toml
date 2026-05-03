@@ -1,18 +1,11 @@
 [package]
 name = "game"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
 
 [dependencies]
-winit = "0.29"
-wgpu = "0.19"
-hecs = "0.10"
+raylib = "5.0"
 glam = "0.24"
-pollster = "0.3"
-log = "0.4"
-env_logger = "0.10"
-bytemuck = { version = "1.13", features = ["derive"] }
-rapier3d = "0.18"
-kira = "0.8"
-instant = "0.1"
 noise = "0.8"
+bytemuck = { version = "1.12", features = ["derive"] }
+instant = "0.1"
