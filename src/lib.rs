@@ -9,6 +9,7 @@ use glam::{Vec3, Mat4};
 use wgpu::util::DeviceExt;
 use rapier3d::prelude::*;
 use noise::{NoiseFn, Perlin};
+use instant::Instant;
 
 // --- Графічні типи ---
 
@@ -142,12 +143,10 @@ pub struct Engine {
 
     render_pipeline: wgpu::RenderPipeline,
     
-    // Куб (Гравець)
     cube_vertex_buffer: wgpu::Buffer,
     cube_index_buffer: wgpu::Buffer,
     num_cube_indices: u32,
 
-    // Земля (Terrain)
     terrain_vertex_buffer: wgpu::Buffer,
     terrain_index_buffer: wgpu::Buffer,
     num_terrain_indices: u32,
@@ -160,6 +159,8 @@ pub struct Engine {
     pub world: hecs::World,
     pub input: HashSet<KeyCode>,
     pub physics: PhysicsContext,
+    
+    last_frame_inst: Instant,
 }
 
 impl Engine {
@@ -194,7 +195,6 @@ impl Engine {
         };
         surface.configure(&device, &config);
 
-        // --- Камера ---
         let camera = Camera {
             eye: (0.0, 20.0, 30.0).into(),
             target: (0.0, 0.0, 0.0).into(),
@@ -237,7 +237,6 @@ impl Engine {
             label: None,
         });
 
-        // --- Pipeline ---
         let shader = device.create_shader_module(wgpu::include_wgsl!("shader.wgsl"));
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             bind_group_layouts: &[&camera_bind_group_layout],
@@ -270,7 +269,6 @@ impl Engine {
             multiview: None,
         });
 
-        // --- Геометрія Куба (Гравець) ---
         let cube_vertices: &[Vertex] = &[
             Vertex { position: [-0.5, -0.5,  0.5], color: [1.0, 0.0, 0.0] },
             Vertex { position: [ 0.5, -0.5,  0.5], color: [0.0, 1.0, 0.0] },
@@ -296,7 +294,6 @@ impl Engine {
             usage: wgpu::BufferUsages::INDEX,
         });
 
-        // --- Генерація Землі (Terrain) ---
         let mut terrain_vertices = Vec::new();
         let mut terrain_indices = Vec::new();
         let terrain_size = 100;
@@ -309,11 +306,8 @@ impl Engine {
             for x in 0..terrain_res {
                 let fx = x as f32 / terrain_res as f32 * terrain_size as f32 - terrain_size as f32 / 2.0;
                 let fz = z as f32 / terrain_res as f32 * terrain_size as f32 - terrain_size as f32 / 2.0;
-                
-                // Генеруємо висоту через шум
                 let h = perlin.get([fx as f64 * 0.1, fz as f64 * 0.1]) as f32 * 3.0;
                 heights[(z, x)] = h;
-
                 let color = if h > 1.0 { [0.5, 0.5, 0.5] } else { [0.2, 0.5, 0.2] };
                 terrain_vertices.push(Vertex { position: [fx, h, fz], color });
             }
@@ -338,18 +332,15 @@ impl Engine {
             usage: wgpu::BufferUsages::INDEX,
         });
 
-        // --- Фізика ---
         let mut physics = PhysicsContext::new();
-        
-        // Фізичний ландшафт
         let terrain_collider = ColliderBuilder::heightfield(heights, vector![terrain_size as f32, 1.0, terrain_size as f32])
             .build();
         physics.collider_set.insert(terrain_collider);
 
-        // Гравець
         let rigid_body = RigidBodyBuilder::dynamic()
             .translation(vector![0.0, 10.0, 0.0])
             .lock_rotations()
+            .linear_damping(1.0) // Додаємо опір повітря для плавності
             .build();
         let handle = physics.rigid_body_set.insert(rigid_body);
         let player_collider = ColliderBuilder::cuboid(0.5, 0.5, 0.5).build();
@@ -379,6 +370,7 @@ impl Engine {
             world,
             input: HashSet::new(),
             physics,
+            last_frame_inst: Instant::now(),
         }
     }
 
@@ -393,6 +385,9 @@ impl Engine {
     }
 
     pub fn update(&mut self) {
+        let dt = self.last_frame_inst.elapsed().as_secs_f32();
+        self.last_frame_inst = Instant::now();
+
         self.physics.step();
 
         let mut move_dir = Vec3::ZERO;
@@ -403,15 +398,22 @@ impl Engine {
 
         for (_id, handle) in self.world.query_mut::<&rapier3d::dynamics::RigidBodyHandle>() {
             let body = self.physics.rigid_body_set.get_mut(*handle).unwrap();
-            let pos = *body.translation(); // Копіюємо значення, щоб уникнути конфлікту запозичень
+            let pos = *body.translation();
             
             if move_dir.length() > 0.0 {
-                let move_dir = move_dir.normalize() * 0.1;
-                body.set_translation(pos + vector![move_dir.x, 0.0, move_dir.z], true);
+                let move_dir = move_dir.normalize() * 20.0; // Швидкість (м/с)
+                // Використовуємо зміну лінійної швидкості для плавного руху
+                body.set_linvel(vector![move_dir.x, body.linvel().y, move_dir.z], true);
+            } else {
+                // Плавне зупинення
+                body.set_linvel(vector![0.0, body.linvel().y, 0.0], true);
             }
 
-            self.camera.target = Vec3::new(pos.x, pos.y, pos.z);
-            self.camera.eye = self.camera.target + Vec3::new(0.0, 10.0, 20.0);
+            // Плавне слідування камери (Lerp)
+            let target_pos = Vec3::new(pos.x, pos.y, pos.z);
+            self.camera.target = self.camera.target.lerp(target_pos, dt * 5.0);
+            let desired_eye = self.camera.target + Vec3::new(0.0, 10.0, 20.0);
+            self.camera.eye = self.camera.eye.lerp(desired_eye, dt * 3.0);
         }
 
         self.camera_uniform.update_view_proj(&self.camera);
@@ -438,13 +440,10 @@ impl Engine {
 
             rp.set_pipeline(&self.render_pipeline);
             rp.set_bind_group(0, &self.camera_bind_group, &[]);
-            
-            // Малюємо Землю
             rp.set_vertex_buffer(0, self.terrain_vertex_buffer.slice(..));
             rp.set_index_buffer(self.terrain_index_buffer.slice(..), wgpu::IndexFormat::Uint16);
             rp.draw_indexed(0..self.num_terrain_indices, 0, 0..1);
 
-            // Малюємо Гравця
             rp.set_vertex_buffer(0, self.cube_vertex_buffer.slice(..));
             rp.set_index_buffer(self.cube_index_buffer.slice(..), wgpu::IndexFormat::Uint16);
             rp.draw_indexed(0..self.num_cube_indices, 0, 0..1);
@@ -459,7 +458,7 @@ impl Engine {
 pub async fn run() {
     env_logger::init();
     let event_loop = EventLoop::new().unwrap();
-    let window = WindowBuilder::new().with_title("Survival Engine - Terrain").build(&event_loop).unwrap();
+    let window = WindowBuilder::new().with_title("Survival Engine - Smooth Physics").build(&event_loop).unwrap();
     let mut engine = Engine::new(window).await;
 
     let _ = event_loop.run(move |event, elwt| {
