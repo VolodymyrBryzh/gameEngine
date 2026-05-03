@@ -1,7 +1,23 @@
-/target
-**/*.rs.bk
-node_modules/
-dist/
-.env
-.vscode/
-*.log
+# Visual Studio
+.vs/
+out/
+build/
+bin/
+obj/
+*.user
+*.suo
+*.sln
+*.vcxproj
+*.filters
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+CMakeSettings.json
+cmake_install.cmake
+install_manifest.txt
+
+# Executables
+*.exe
+*.pdb
+*.ilk
