@@ -47,7 +47,7 @@ pub struct Engine {
     config: wgpu::SurfaceConfiguration,
     render_pipeline: wgpu::RenderPipeline,
     depth_view: wgpu::TextureView,
-    msaa_view: wgpu::TextureView, // ДОДАНО ДЛЯ MSAA
+    msaa_view: wgpu::TextureView,
     
     cube_vb: wgpu::Buffer, num_cube_verts: u32,
     terrain_vb: wgpu::Buffer, terrain_ib: wgpu::Buffer, num_terrain_idx: u32,
@@ -80,7 +80,6 @@ impl Engine {
         let config = surface.get_default_config(&adapter, size.width, size.height).unwrap();
         surface.configure(&device, &config);
 
-        // MSAA & Depth
         let msaa_tex = device.create_texture(&wgpu::TextureDescriptor {
             label: None, size: wgpu::Extent3d { width: config.width, height: config.height, depth_or_array_layers: 1 },
             mip_level_count: 1, sample_count: 4, dimension: wgpu::TextureDimension::D2, format: config.format,
@@ -114,7 +113,7 @@ impl Engine {
             multiview: None,
         });
 
-        // Меші
+        // Куб гравця
         let mut cube_v = Vec::new();
         let faces = [
             ([0,0,1], [[-1,-1,1],[1,-1,1],[1,1,1],[-1,1,1]]), ([0,0,-1], [[-1,1,-1],[1,1,-1],[1,-1,-1],[-1,-1,-1]]),
@@ -122,7 +121,7 @@ impl Engine {
             ([1,0,0], [[1,-1,1],[1,-1,-1],[1,1,-1],[1,1,1]]), ([-1,0,0], [[-1,-1,-1],[-1,-1,1],[-1,1,1],[-1,1,-1]]),
         ];
         for (n, quad) in faces {
-            let color = [0.8, 0.3, 0.2];
+            let color = [0.8, 0.2, 0.1];
             let n_f = [n[0] as f32, n[1] as f32, n[2] as f32];
             let v0 = Vertex { position: [quad[0][0] as f32 * 0.5, quad[0][1] as f32 * 0.5, quad[0][2] as f32 * 0.5], color, normal: n_f };
             let v1 = Vertex { position: [quad[1][0] as f32 * 0.5, quad[1][1] as f32 * 0.5, quad[1][2] as f32 * 0.5], color, normal: n_f };
@@ -132,18 +131,19 @@ impl Engine {
         }
         let cube_vb = device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: None, contents: bytemuck::cast_slice(&cube_v), usage: wgpu::BufferUsages::VERTEX });
 
+        // Ландшафт
         let mut terrain_verts = Vec::new(); let mut terrain_idx = Vec::new();
-        let t_size = 500.0; let t_res = 130;
-        let perlin = Perlin::new(42);
+        let t_size = 600.0; let t_res = 120;
+        let perlin = Perlin::new(1);
         for y in 0..t_res {
             for x in 0..t_res {
                 let fx = (x as f32 / (t_res-1) as f32) * t_size - t_size / 2.0;
                 let fy = (y as f32 / (t_res-1) as f32) * t_size - t_size / 2.0;
                 let h = perlin.get([fx as f64 * 0.01, fy as f64 * 0.01]) as f32 * 25.0;
-                let h_x = perlin.get([(fx+0.5) as f64 * 0.01, fy as f64 * 0.01]) as f32 * 25.0;
-                let h_y = perlin.get([fx as f64 * 0.01, (fy+0.5) as f64 * 0.01]) as f32 * 25.0;
-                let normal = Vec3::new(h - h_x, h - h_y, 0.5).normalize();
-                let color = if h > 15.0 { [0.9, 0.9, 0.9] } else if h < 0.5 { [0.7, 0.65, 0.5] } else { [0.25, 0.5, 0.25] };
+                let h_x = perlin.get([(fx+0.2) as f64 * 0.01, fy as f64 * 0.01]) as f32 * 25.0;
+                let h_y = perlin.get([fx as f64 * 0.01, (fy+0.2) as f64 * 0.01]) as f32 * 25.0;
+                let normal = Vec3::new(h - h_x, h - h_y, 0.2).normalize();
+                let color = if h > 15.0 { [0.8, 0.8, 0.8] } else if h < 0.2 { [0.7, 0.6, 0.4] } else { [0.2, 0.5, 0.2] };
                 terrain_verts.push(Vertex { position: [fx, fy, h], color, normal: normal.into() });
             }
         }
@@ -156,16 +156,17 @@ impl Engine {
         let terrain_vb = device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: None, contents: bytemuck::cast_slice(&terrain_verts), usage: wgpu::BufferUsages::VERTEX });
         let terrain_ib = device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: None, contents: bytemuck::cast_slice(&terrain_idx), usage: wgpu::BufferUsages::INDEX });
 
-        let mut water_v = Vec::new();
-        let w_res = 80; let w_size = 1000.0;
-        for y in 0..w_res {
-            for x in 0..w_res {
-                let fx = (x as f32 / (w_res-1) as f32) * w_size - w_size / 2.0;
-                let fy = (y as f32 / (w_res-1) as f32) * w_size - w_size / 2.0;
-                water_v.push(Vertex { position: [fx, fy, -2.5], color: [0.1, 0.3, 0.6], normal: [0.0,0.0,1.0] });
-            }
-        }
-        let water_vb = device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: None, contents: bytemuck::cast_slice(&water_v), usage: wgpu::BufferUsages::VERTEX });
+        // ВОДА: ТЕПЕР СУЦІЛЬНА ПЛОЩИНА (БЕЗ ДІРОК)
+        let w_size = 1500.0;
+        let water_v = &[
+            Vertex { position: [-w_size, -w_size, -2.5], color: [0.1, 0.2, 0.5], normal: [0.0,0.0,1.0] },
+            Vertex { position: [ w_size, -w_size, -2.5], color: [0.1, 0.2, 0.5], normal: [0.0,0.0,1.0] },
+            Vertex { position: [ w_size,  w_size, -2.5], color: [0.1, 0.2, 0.5], normal: [0.0,0.0,1.0] },
+            Vertex { position: [-w_size, -w_size, -2.5], color: [0.1, 0.2, 0.5], normal: [0.0,0.0,1.0] },
+            Vertex { position: [ w_size,  w_size, -2.5], color: [0.1, 0.2, 0.5], normal: [0.0,0.0,1.0] },
+            Vertex { position: [-w_size,  w_size, -2.5], color: [0.1, 0.2, 0.5], normal: [0.0,0.0,1.0] },
+        ];
+        let water_vb = device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: None, contents: bytemuck::cast_slice(water_v), usage: wgpu::BufferUsages::VERTEX });
 
         let aspect = config.width as f32 / config.height as f32;
         Self {
@@ -200,7 +201,7 @@ impl Engine {
         if self.input.contains(&KeyCode::KeyA) { move_dir += rgt; }
         if self.input.contains(&KeyCode::KeyD) { move_dir -= rgt; }
         if move_dir.length() > 0.0 {
-            let v = move_dir.normalize() * 22.0;
+            let v = move_dir.normalize() * 25.0;
             self.player_vel.x = v.x; self.player_vel.y = v.y;
         } else {
             self.player_vel.x *= 0.8; self.player_vel.y *= 0.8;
@@ -220,7 +221,7 @@ impl Engine {
         let y_rad = self.camera.yaw.to_radians();
         let dist = 35.0;
         self.camera.eye = Vec3::new(self.player_pos.x - dist * p_rad.cos() * y_rad.cos(), self.player_pos.y - dist * p_rad.cos() * y_rad.sin(), self.player_pos.z + dist * p_rad.sin());
-        let vm = Mat4::perspective_rh(self.camera.fovy.to_radians(), self.camera.aspect, 0.1, 4000.0) * Mat4::look_at_rh(self.camera.eye, self.player_pos, self.camera.up);
+        let vm = Mat4::perspective_rh(self.camera.fovy.to_radians(), self.camera.aspect, 0.1, 5000.0) * Mat4::look_at_rh(self.camera.eye, self.player_pos, self.camera.up);
         
         let mut cam_data = [0.0f32; 24];
         cam_data[0..16].copy_from_slice(&vm.to_cols_array());
@@ -236,8 +237,7 @@ impl Engine {
         {
             let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment { 
-                    view: &self.msaa_view, 
-                    resolve_target: Some(&view), 
+                    view: &self.msaa_view, resolve_target: Some(&view), 
                     ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.5, g: 0.7, b: 0.9, a: 1.0 }), store: wgpu::StoreOp::Store } 
                 })],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment { view: &self.depth_view, depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Store }), stencil_ops: None }),
@@ -248,7 +248,7 @@ impl Engine {
             self.queue.write_buffer(&self.model_buf, 0, bytemuck::cast_slice(&[Mat4::IDENTITY.to_cols_array_2d()]));
             rp.set_bind_group(1, &self.model_bg, &[]);
             rp.set_vertex_buffer(0, self.water_vb.slice(..));
-            rp.draw(0..6400, 0..1); // 80x80 grid
+            rp.draw(0..6, 0..1); // ТЕПЕР ЦЕ СУЦІЛЬНА ПЛОЩИНА
             rp.set_vertex_buffer(0, self.terrain_vb.slice(..));
             rp.set_index_buffer(self.terrain_ib.slice(..), wgpu::IndexFormat::Uint16);
             rp.draw_indexed(0..self.num_terrain_idx, 0, 0..1);
