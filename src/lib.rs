@@ -403,7 +403,7 @@ impl Engine {
 
         for (_id, handle) in self.world.query_mut::<&rapier3d::dynamics::RigidBodyHandle>() {
             let body = self.physics.rigid_body_set.get_mut(*handle).unwrap();
-            let pos = body.translation();
+            let pos = *body.translation(); // Копіюємо значення, щоб уникнути конфлікту запозичень
             
             if move_dir.length() > 0.0 {
                 let move_dir = move_dir.normalize() * 0.1;
