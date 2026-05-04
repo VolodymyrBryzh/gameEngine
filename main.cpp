@@ -28,18 +28,29 @@ int main() {
     DisableCursor();
 
     while (!WindowShouldClose()) {
-        // --- ЛОГІКА РУХУ ---
-        Vector3 forward = { 
-            camera.target.x - camera.position.x, 
-            0, 
-            camera.target.z - camera.position.z 
-        };
-        float length = sqrtf(forward.x * forward.x + forward.z * forward.z);
-        if (length != 0) { forward.x /= length; forward.z /= length; }
+        // --- ОГЛЯД МИШЕЮ ---
+        Vector2 mouseDelta = GetMouseDelta();
+        static float pitch = 0.0f; // Вгору/вниз
+        static float yaw = 0.0f;   // Вліво/вправо
 
-        Vector3 right = { -forward.z, 0, forward.x };
+        yaw -= mouseDelta.x * 0.003f;
+        pitch -= mouseDelta.y * 0.003f;
 
-        // Рух WASD
+        // Обмеження огляду вгору/вниз (щоб не "перекрутитися")
+        if (pitch > 1.5f) pitch = 1.5f;
+        if (pitch < -1.5f) pitch = -1.5f;
+
+        // Обчислення нового напрямку погляду
+        camera.target.x = player.position.x + sinf(yaw) * cosf(pitch);
+        camera.target.y = player.position.y + sinf(pitch);
+        camera.target.z = player.position.z + cosf(yaw) * cosf(pitch);
+        
+        camera.position = player.position; // Прив'язуємо камеру до гравця
+
+        // --- ЛОГІКА РУХУ WASD ---
+        Vector3 forward = { sinf(yaw), 0, cosf(yaw) };
+        Vector3 right = { cosf(yaw), 0, -sinf(yaw) };
+
         if (IsKeyDown(KEY_W)) {
             player.position.x += forward.x * player.speed;
             player.position.z += forward.z * player.speed;
@@ -49,28 +60,27 @@ int main() {
             player.position.z -= forward.z * player.speed;
         }
         if (IsKeyDown(KEY_A)) {
-            player.position.x -= right.x * player.speed;
-            player.position.z -= right.z * player.speed;
-        }
-        if (IsKeyDown(KEY_D)) {
             player.position.x += right.x * player.speed;
             player.position.z += right.z * player.speed;
         }
+        if (IsKeyDown(KEY_D)) {
+            player.position.x -= right.x * player.speed;
+            player.position.z -= right.z * player.speed;
+        }
 
-        // Гравітація та Стрибок
-        player.velocityY -= 0.01f; // Сила тяжіння
+        // --- ФІЗИКА ТА ГРАВІТАЦІЯ ---
+        player.velocityY -= 0.01f; // Гравітація
         player.position.y += player.velocityY;
 
-        // Колізія з ландшафтом (спрощена)
+        // Колізія з землею
         float floorHeight = 0.0f;
         int gridX = (int)round(player.position.x / 3.0f);
         int gridZ = (int)round(player.position.z / 3.0f);
-        
         if (gridX >= -15 && gridX < 15 && gridZ >= -15 && gridZ < 15) {
             floorHeight = (sin((float)gridX * 3.0f * 0.2f) + cos((float)gridZ * 3.0f * 0.2f)) * 3.0f + 2.0f;
         }
 
-        if (player.position.y < floorHeight + 2.0f) { // 2.0f - зріст гравця
+        if (player.position.y < floorHeight + 2.0f) {
             player.position.y = floorHeight + 2.0f;
             player.velocityY = 0;
             player.isGrounded = true;
@@ -79,12 +89,8 @@ int main() {
         }
 
         if (IsKeyPressed(KEY_SPACE) && player.isGrounded) {
-            player.velocityY = 0.2f; // Сила стрибка
+            player.velocityY = 0.2f; // Стрибок
         }
-
-        // Оновлення камери
-        UpdateCamera(&camera, CAMERA_FIRST_PERSON); 
-        camera.position = player.position; // Прив'язуємо камеру до гравця
 
         BeginDrawing();
             ClearBackground(Color{ 135, 206, 235, 255 });
