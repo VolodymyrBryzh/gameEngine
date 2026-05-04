@@ -8,7 +8,15 @@
 constexpr int CHUNK_SIZE  = 32;
 constexpr int CHUNK_VERTS = CHUNK_SIZE + 1;  // 33×33 vertices per chunk
 
-struct TreeData { Vector3 pos; float trunkH; float crownR; };
+struct TreeData {
+    Vector3 pos;       // base position on the ground
+    float   scale;     // overall size (0.7..1.5) — applied uniformly
+    float   rotation;  // Y rotation in radians (random per-tree variety)
+    float   trunkH;    // collision/gameplay trunk height (= 3.0 * scale)
+    float   trunkR;    // collision radius at base   (= 0.20 * scale)
+    int     hp;        // for future chopping system (default 100)
+    bool    fallen;    // future fall-animation flag
+};
 struct RockData  { Vector3 pos; float radius; };
 
 struct Chunk {
@@ -117,8 +125,17 @@ inline Chunk BuildChunk(const PerlinNoise& pn, int cx, int cz) {
 
             // Trees: green zone only (height 12..38)
             if (h >= 12.0f && h <= 38.0f && density > 0.55f) {
-                float s = 0.7f + pn.noise(px * 0.2f, pz * 0.2f) * 0.6f;
-                c.trees.push_back({ {px, h, pz}, 2.5f * s, 2.8f * s });
+                float scale = 0.7f + pn.noise(px * 0.2f, pz * 0.2f) * 0.8f;
+                float rot   = pn.noise(px * 0.5f, pz * 0.7f) * 2.0f * PI;
+                c.trees.push_back({
+                    { px, h, pz },
+                    scale,
+                    rot,
+                    3.0f * scale,    // trunkH
+                    0.20f * scale,   // trunkR
+                    100,             // hp
+                    false            // fallen
+                });
             }
             // Rocks: anywhere above water, less frequent
             else if (h > 8.0f && h <= 55.0f && density < 0.18f) {

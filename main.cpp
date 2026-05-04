@@ -2,6 +2,7 @@
 #include "raymath.h"
 #include "perlin_noise.h"
 #include "chunk_manager.h"
+#include "tree_assets.h"
 #include <cmath>
 
 struct Player {
@@ -17,6 +18,10 @@ int main() {
 
     PerlinNoise  pn;
     ChunkManager world(pn);
+
+    // Build the shared tree mesh once — every tree instance reuses it via DrawModelEx
+    TreeAssets treeAssets = BuildTreeMesh();
+    world.SetTreeAssets(treeAssets);
 
     // Load 5×5 chunks synchronously before first frame so player doesn't fall through
     Vector3 startPos = { 64.0f, 100.0f, 64.0f };
@@ -71,6 +76,7 @@ int main() {
 
         player.position.x += player.velocity.x * dt;
         player.position.z += player.velocity.z * dt;
+        world.ApplyTreeCollision(player.position);
         player.velocityY  -= 0.6f * dt;
         player.position.y += player.velocityY;
 
@@ -113,6 +119,7 @@ int main() {
         EndDrawing();
     }
 
+    treeAssets.Unload();
     CloseWindow();
     return 0;
 }
