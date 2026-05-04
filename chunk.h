@@ -18,17 +18,15 @@ struct TreeData {
 };
 struct RockData { Vector3 pos; float radius; };
 
-// Holds CPU-side mesh arrays + object lists before GPU upload.
-// Safe to build on any thread — no OpenGL calls inside.
 struct ChunkBuildResult {
-    int cx = 0, cz = 0;
+    int cx = 0, cz = 0, lod = 0;
     Mesh mesh = {};
     std::vector<TreeData> trees;
     std::vector<RockData> rocks;
 };
 
 struct Chunk {
-    int cx = 0, cz = 0;
+    int cx = 0, cz = 0, lod = 0;
     Mesh  mesh  = {};
     Model model = {};
     std::vector<TreeData> trees;
@@ -40,7 +38,6 @@ struct Chunk {
     }
 };
 
-// Domain-warped height at any world (x, z). Deterministic, no caching.
 inline float SampleWorldHeight(const PerlinNoise& pn, float x, float z) {
     float warpX = pn.fbm(x * 0.005f,        z * 0.005f,        3) * 2.0f - 1.0f;
     float warpZ = pn.fbm(x * 0.005f + 5.2f, z * 0.005f + 1.3f, 3) * 2.0f - 1.0f;
@@ -49,26 +46,37 @@ inline float SampleWorldHeight(const PerlinNoise& pn, float x, float z) {
 }
 
 // CPU-only build — safe to call from worker threads.
-// Fills mesh.vertices/normals/colors and object lists; does NOT call UploadMesh.
-inline ChunkBuildResult BuildChunkCPU(const PerlinNoise& pn, int cx, int cz) {
+// lod=0: full 33×33 grid + objects; lod=1: 17×17 grid, no objects (4× fewer triangles).
+inline ChunkBuildResult BuildChunkCPU(const PerlinNoise& pn, int cx, int cz, int lod = 0) {
     ChunkBuildResult r;
-    r.cx = cx;
-    r.cz = cz;
+    r.cx  = cx;
+    r.cz  = cz;
+    r.lod = lod;
 
     const float ox = (float)(cx * CHUNK_SIZE);
     const float oz = (float)(cz * CHUNK_SIZE);
+    const int   step = (lod == 0) ? 1 : 2;
 
-    constexpr int HW = CHUNK_SIZE + 3;  // 35×35 extended grid
+    // Extended heightmap: covers [-2, CHUNK_SIZE+2] so central-difference normals
+    // are correct at borders for both step=1 and step=2.
+    constexpr int HW = CHUNK_SIZE + 5;  // 37×37
     float hmap[HW * HW];
     for (int i = 0; i < HW; i++)
         for (int j = 0; j < HW; j++)
-            hmap[i * HW + j] = SampleWorldHeight(pn, ox + i - 1, oz + j - 1);
+            hmap[i * HW + j] = SampleWorldHeight(pn, ox + i - 2, oz + j - 2);
 
-    auto H = [&](int i, int j) { return hmap[(i+1) * HW + (j+1)]; };
+    // H(i,j) with i,j in [-2, CHUNK_SIZE+2]
+    auto H = [&](int i, int j) { return hmap[(i+2) * HW + (j+2)]; };
 
     const Vector3 kLight = Vector3Normalize({ 0.5f, 1.0f, 0.2f });
+    // Central differences scaled by step so the normal magnitude is independent of LOD.
     auto SmoothN = [&](int i, int j) -> Vector3 {
-        return Vector3Normalize({ H(i-1,j) - H(i+1,j), 2.0f, H(i,j-1) - H(i,j+1) });
+        float fs = (float)step;
+        return Vector3Normalize({
+            H(i-step, j) - H(i+step, j),
+            2.0f * fs,
+            H(i, j-step) - H(i, j+step)
+        });
     };
     auto VertColor = [](float y) -> Color {
         if      (y > 60.0f) return WHITE;
@@ -77,8 +85,9 @@ inline ChunkBuildResult BuildChunkCPU(const PerlinNoise& pn, int cx, int cz) {
         else                return DARKGREEN;
     };
 
+    int cells = CHUNK_SIZE / step;          // 32 or 16
     Mesh& mesh = r.mesh;
-    mesh.triangleCount = CHUNK_SIZE * CHUNK_SIZE * 2;
+    mesh.triangleCount = cells * cells * 2;
     mesh.vertexCount   = mesh.triangleCount * 3;
     mesh.vertices = (float *)        MemAlloc(mesh.vertexCount * 3 * sizeof(float));
     mesh.normals  = (float *)        MemAlloc(mesh.vertexCount * 3 * sizeof(float));
@@ -104,30 +113,33 @@ inline ChunkBuildResult BuildChunkCPU(const PerlinNoise& pn, int cx, int cz) {
         vi++;
     };
 
-    for (int x = 0; x < CHUNK_SIZE; x++)
-        for (int z = 0; z < CHUNK_SIZE; z++) {
-            AddV(x,   z  ); AddV(x,   z+1); AddV(x+1, z  );
-            AddV(x+1, z  ); AddV(x,   z+1); AddV(x+1, z+1);
+    for (int x = 0; x < CHUNK_SIZE; x += step)
+        for (int z = 0; z < CHUNK_SIZE; z += step) {
+            AddV(x,        z       ); AddV(x,        z+step); AddV(x+step, z      );
+            AddV(x+step,   z       ); AddV(x,        z+step); AddV(x+step, z+step );
         }
 
-    const int GRID = 7;
-    for (int gx = 0; gx < CHUNK_SIZE; gx += GRID) {
-        for (int gz = 0; gz < CHUNK_SIZE; gz += GRID) {
-            float density = pn.noise((ox + gx) * 0.08f, (oz + gz) * 0.08f);
-            float jx = (pn.noise((ox+gx) * 0.4f, (oz+gz) * 0.1f) - 0.5f) * GRID * 0.9f;
-            float jz = (pn.noise((ox+gx) * 0.1f, (oz+gz) * 0.4f) - 0.5f) * GRID * 0.9f;
-            float px = ox + gx + jx;
-            float pz = oz + gz + jz;
-            float h  = SampleWorldHeight(pn, px, pz);
+    // Objects only on full-resolution chunks
+    if (lod == 0) {
+        const int GRID = 7;
+        for (int gx = 0; gx < CHUNK_SIZE; gx += GRID) {
+            for (int gz = 0; gz < CHUNK_SIZE; gz += GRID) {
+                float density = pn.noise((ox+gx) * 0.08f, (oz+gz) * 0.08f);
+                float jx = (pn.noise((ox+gx)*0.4f, (oz+gz)*0.1f) - 0.5f) * GRID * 0.9f;
+                float jz = (pn.noise((ox+gx)*0.1f, (oz+gz)*0.4f) - 0.5f) * GRID * 0.9f;
+                float px = ox + gx + jx;
+                float pz = oz + gz + jz;
+                float h  = SampleWorldHeight(pn, px, pz);
 
-            if (h >= 12.0f && h <= 38.0f && density > 0.55f) {
-                float scale = 0.7f + pn.noise(px * 0.2f, pz * 0.2f) * 0.8f;
-                float rot   = pn.noise(px * 0.5f, pz * 0.7f) * 2.0f * PI;
-                r.trees.push_back({ {px,h,pz}, scale, rot,
-                    3.0f*scale, 0.20f*scale, 100, false });
-            } else if (h > 8.0f && h <= 55.0f && density < 0.18f) {
-                float s = 0.4f + pn.noise(px * 0.3f, pz * 0.3f) * 0.5f;
-                r.rocks.push_back({ {px,h,pz}, 0.5f*s });
+                if (h >= 12.0f && h <= 38.0f && density > 0.55f) {
+                    float scale = 0.7f + pn.noise(px*0.2f, pz*0.2f) * 0.8f;
+                    float rot   = pn.noise(px*0.5f, pz*0.7f) * 2.0f * PI;
+                    r.trees.push_back({ {px,h,pz}, scale, rot,
+                        3.0f*scale, 0.20f*scale, 100, false });
+                } else if (h > 8.0f && h <= 55.0f && density < 0.18f) {
+                    float s = 0.4f + pn.noise(px*0.3f, pz*0.3f) * 0.5f;
+                    r.rocks.push_back({ {px,h,pz}, 0.5f*s });
+                }
             }
         }
     }
@@ -136,11 +148,12 @@ inline ChunkBuildResult BuildChunkCPU(const PerlinNoise& pn, int cx, int cz) {
 }
 
 // GPU upload — main thread only.
-inline Chunk BuildChunk(const PerlinNoise& pn, int cx, int cz) {
-    ChunkBuildResult r = BuildChunkCPU(pn, cx, cz);
+inline Chunk BuildChunk(const PerlinNoise& pn, int cx, int cz, int lod = 0) {
+    ChunkBuildResult r = BuildChunkCPU(pn, cx, cz, lod);
     Chunk c;
     c.cx    = r.cx;
     c.cz    = r.cz;
+    c.lod   = r.lod;
     c.mesh  = r.mesh;
     c.trees = std::move(r.trees);
     c.rocks = std::move(r.rocks);
