@@ -1,5 +1,6 @@
 #ifndef PERLIN_NOISE_H
 #define PERLIN_NOISE_H
+// Perlin noise with fBm support
 
 #include <vector>
 #include <numeric>
