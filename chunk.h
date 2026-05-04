@@ -86,8 +86,10 @@ inline ChunkBuildResult BuildChunkCPU(const PerlinNoise& pn, int cx, int cz, int
     };
 
     int cells = CHUNK_SIZE / step;          // 32 or 16
+    // Skirt: cells × 8 extra triangles (4 edges × cells × 2 tris) hide LOD seams
+    int skirtTris = cells * 8;
     Mesh& mesh = r.mesh;
-    mesh.triangleCount = cells * cells * 2;
+    mesh.triangleCount = cells * cells * 2 + skirtTris;
     mesh.vertexCount   = mesh.triangleCount * 3;
     mesh.vertices = (float *)        MemAlloc(mesh.vertexCount * 3 * sizeof(float));
     mesh.normals  = (float *)        MemAlloc(mesh.vertexCount * 3 * sizeof(float));
@@ -118,6 +120,51 @@ inline ChunkBuildResult BuildChunkCPU(const PerlinNoise& pn, int cx, int cz, int
             AddV(x,        z       ); AddV(x,        z+step); AddV(x+step, z      );
             AddV(x+step,   z       ); AddV(x,        z+step); AddV(x+step, z+step );
         }
+
+    // === SKIRTS ===
+    // Vertical strips going down by SKIRT_DEPTH around the chunk perimeter.
+    // They hide gaps where LOD=0 (33 verts/edge) meets LOD=1 (17 verts/edge):
+    // the LOD=0 detail bumps create a vertical mismatch with LOD=1's straight line,
+    // and the skirt's downward face covers that gap.
+    constexpr float SKIRT_DEPTH = 8.0f;
+    auto AddSkirtTri = [&](Vector3 p1, Vector3 p2, Vector3 p3, Color base) {
+        Vector3 n = Vector3Normalize(Vector3CrossProduct(
+            Vector3Subtract(p2, p1), Vector3Subtract(p3, p1)));
+        float lit = Vector3DotProduct(n, kLight);
+        if (lit < 0.3f) lit = 0.3f;
+        Vector3 pts[3] = { p1, p2, p3 };
+        for (int k = 0; k < 3; k++) {
+            mesh.vertices[vi*3]   = pts[k].x;
+            mesh.vertices[vi*3+1] = pts[k].y;
+            mesh.vertices[vi*3+2] = pts[k].z;
+            mesh.normals[vi*3]    = n.x;
+            mesh.normals[vi*3+1]  = n.y;
+            mesh.normals[vi*3+2]  = n.z;
+            mesh.colors[vi*4]     = (unsigned char)(base.r * lit);
+            mesh.colors[vi*4+1]   = (unsigned char)(base.g * lit);
+            mesh.colors[vi*4+2]   = (unsigned char)(base.b * lit);
+            mesh.colors[vi*4+3]   = 255;
+            vi++;
+        }
+    };
+    auto SkirtQuad = [&](int gx1, int gz1, int gx2, int gz2, bool flip) {
+        Vector3 a    = { ox + gx1, H(gx1, gz1),                oz + gz1 };
+        Vector3 b    = { ox + gx2, H(gx2, gz2),                oz + gz2 };
+        Vector3 aBot = { a.x,      a.y - SKIRT_DEPTH,          a.z      };
+        Vector3 bBot = { b.x,      b.y - SKIRT_DEPTH,          b.z      };
+        Color  col   = VertColor((a.y + b.y) * 0.5f);
+        if (flip) { AddSkirtTri(a, aBot, bBot, col); AddSkirtTri(a, bBot, b,    col); }
+        else      { AddSkirtTri(a, bBot, aBot, col); AddSkirtTri(a, b,    bBot, col); }
+    };
+
+    for (int x = 0; x < CHUNK_SIZE; x += step) {
+        SkirtQuad(x, 0,          x + step, 0,          false);  // south, outward -Z
+        SkirtQuad(x, CHUNK_SIZE, x + step, CHUNK_SIZE, true);   // north, outward +Z
+    }
+    for (int z = 0; z < CHUNK_SIZE; z += step) {
+        SkirtQuad(0,          z, 0,          z + step, true);   // west,  outward -X
+        SkirtQuad(CHUNK_SIZE, z, CHUNK_SIZE, z + step, false);  // east,  outward +X
+    }
 
     // Objects only on full-resolution chunks
     if (lod == 0) {

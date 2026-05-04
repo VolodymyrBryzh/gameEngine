@@ -9,6 +9,7 @@
 #include <condition_variable>
 #include <atomic>
 #include <cstdint>
+#include <climits>
 #include <cmath>
 
 struct WorkItem { int cx, cz, lod; };
@@ -134,29 +135,37 @@ public:
         int pcx = ChunkCoord(pos.x);
         int pcz = ChunkCoord(pos.z);
 
-        // 1. Upload CPU-ready results
+        auto MakeChunk = [](ChunkBuildResult&& r) -> Chunk {
+            Chunk c;
+            c.cx    = r.cx;  c.cz   = r.cz;  c.lod  = r.lod;
+            c.mesh  = r.mesh;
+            c.trees = std::move(r.trees);
+            c.rocks = std::move(r.rocks);
+            UploadMesh(&c.mesh, false);
+            c.model = LoadModelFromMesh(c.mesh);
+            c.ready = true;
+            return c;
+        };
+
+        // 1. Upload CPU-ready results — swap on LOD upgrade, never leave a hole.
+        // A new result is accepted if no chunk exists OR existing chunk has worse LOD
+        // (lod number is larger). Same-or-better LOD: discard the result.
         {
             std::lock_guard<std::mutex> lk(uploadMutex);
             int uploaded = 0;
             while (!uploadQueue.empty() && uploaded < maxUpload) {
                 ChunkBuildResult r = std::move(uploadQueue.front());
                 uploadQueue.pop();
-                int64_t k   = Key(r.cx, r.cz);
-                int needLod = NeededLod(r.cx - pcx, r.cz - pcz, lodRadius);
+                int64_t k = Key(r.cx, r.cz);
                 inFlight.erase(k);
 
-                if (!chunks.count(k) && r.lod == needLod) {
-                    Chunk c;
-                    c.cx    = r.cx;  c.cz   = r.cz;  c.lod  = r.lod;
-                    c.mesh  = r.mesh;
-                    c.trees = std::move(r.trees);
-                    c.rocks = std::move(r.rocks);
-                    UploadMesh(&c.mesh, false);
-                    c.model = LoadModelFromMesh(c.mesh);
-                    c.ready = true;
-                    chunks.emplace(k, std::move(c));
+                auto it = chunks.find(k);
+                if (it == chunks.end()) {
+                    chunks.emplace(k, MakeChunk(std::move(r)));
+                } else if (r.lod < it->second.lod) {
+                    it->second.Unload();
+                    it->second = MakeChunk(std::move(r));
                 } else {
-                    // Stale (wrong LOD or already loaded): discard and let step 3 re-queue
                     MemFree(r.mesh.vertices);
                     MemFree(r.mesh.normals);
                     MemFree(r.mesh.colors);
@@ -165,35 +174,25 @@ public:
             }
         }
 
-        // 2. Upgrade LOD=1 chunks that entered the close zone
-        for (auto it = chunks.begin(); it != chunks.end(); ) {
-            Chunk& c   = it->second;
-            int    dx  = c.cx - pcx, dz = c.cz - pcz;
-            int    need = NeededLod(dx, dz, lodRadius);
-            if (c.lod != need && !inFlight.count(it->first)) {
-                c.Unload();
-                it = chunks.erase(it);
-            } else {
-                ++it;
-            }
-        }
-
-        // 3. Queue missing chunks with correct LOD
+        // 2. Queue chunks that don't exist or are at a worse LOD than needed.
+        // Existing higher-quality chunks (lod < needLod) are kept — no downgrades.
         {
             std::lock_guard<std::mutex> lk(workMutex);
             for (int dx = -viewRadius; dx <= viewRadius; dx++)
                 for (int dz = -viewRadius; dz <= viewRadius; dz++) {
-                    int64_t k   = Key(pcx+dx, pcz+dz);
-                    int     lod = NeededLod(dx, dz, lodRadius);
-                    if (!chunks.count(k) && !inFlight.count(k)) {
-                        inFlight[k] = lod;
-                        workQueue.push({pcx+dx, pcz+dz, lod});
+                    int64_t k       = Key(pcx+dx, pcz+dz);
+                    int     needLod = NeededLod(dx, dz, lodRadius);
+                    auto    it      = chunks.find(k);
+                    int     curLod  = (it != chunks.end()) ? it->second.lod : INT_MAX;
+                    if (curLod > needLod && !inFlight.count(k)) {
+                        inFlight[k] = needLod;
+                        workQueue.push({pcx+dx, pcz+dz, needLod});
                     }
                 }
             workCV.notify_all();
         }
 
-        // 4. Unload distant chunks
+        // 3. Unload distant chunks
         for (auto it = chunks.begin(); it != chunks.end(); ) {
             Chunk& c = it->second;
             if (abs(c.cx-pcx) > keepRadius || abs(c.cz-pcz) > keepRadius) {
