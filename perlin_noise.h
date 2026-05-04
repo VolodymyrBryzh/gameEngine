@@ -11,10 +11,10 @@
 class PerlinNoise {
     std::vector<int> p;
 public:
-    PerlinNoise() {
+    explicit PerlinNoise(uint32_t seed = 12345) {
         p.resize(256);
         std::iota(p.begin(), p.end(), 0);
-        std::default_random_engine engine(12345); // Фіксований seed для стабільного ландшафту
+        std::default_random_engine engine(seed);
         std::shuffle(p.begin(), p.end(), engine);
         p.insert(p.end(), p.begin(), p.end());
     }

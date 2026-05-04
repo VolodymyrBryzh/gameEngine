@@ -3,7 +3,13 @@
 #include "perlin_noise.h"
 #include "chunk_manager.h"
 #include "tree_assets.h"
+#include "chunk.h"
 #include <cmath>
+#include <cstring>
+#include <cstdlib>
+#include <ctime>
+#include <fstream>
+#include <filesystem>
 
 struct Player {
     Vector3 position;
@@ -12,19 +18,56 @@ struct Player {
     bool    isGrounded;
 };
 
-int main() {
+static constexpr const char* SAVE_FILE = "save/world.dat";
+
+static uint32_t LoadOrCreateSeed(int argc, char** argv) {
+    for (int i = 1; i < argc - 1; i++)
+        if (strcmp(argv[i], "--seed") == 0)
+            return (uint32_t)atoi(argv[i + 1]);
+
+    std::ifstream f(SAVE_FILE);
+    if (f.is_open()) { uint32_t s; f >> s; return s; }
+
+    return (uint32_t)time(nullptr);
+}
+
+static void SaveSeed(uint32_t seed) {
+    std::filesystem::create_directories("save");
+    std::ofstream f(SAVE_FILE);
+    f << seed;
+}
+
+// Spiral outward from origin until a green tile (h 12..38) is found.
+static Vector3 FindGreenStart(const PerlinNoise& pn) {
+    const float TWO_PI = 2.0f * PI;
+    for (int r = 0; r <= 512; r += 16) {
+        for (int a = 0; a < 16; a++) {
+            float angle = a * (TWO_PI / 16.0f);
+            float x = cosf(angle) * r;
+            float z = sinf(angle) * r;
+            float h = SampleWorldHeight(pn, x, z);
+            if (h >= 12.0f && h <= 38.0f)
+                return { x, h + 2.0f, z };
+        }
+    }
+    float h = SampleWorldHeight(pn, 0, 0);
+    return { 0.0f, h + 2.0f, 0.0f };
+}
+
+int main(int argc, char** argv) {
+    uint32_t seed = LoadOrCreateSeed(argc, argv);
+    SaveSeed(seed);
+
     SetConfigFlags(FLAG_MSAA_4X_HINT);
     InitWindow(1280, 720, "Survival Engine | Infinite Procedural World");
 
-    PerlinNoise  pn;
+    PerlinNoise  pn(seed);
     ChunkManager world(pn);
 
-    // Build the shared tree mesh once — every tree instance reuses it via DrawModelEx
     TreeAssets treeAssets = BuildTreeMesh();
     world.SetTreeAssets(treeAssets);
 
-    // Load 5×5 chunks synchronously before first frame so player doesn't fall through
-    Vector3 startPos = { 64.0f, 100.0f, 64.0f };
+    Vector3 startPos = FindGreenStart(pn);
     world.LoadImmediate(startPos, 2);
 
     Player   player = { startPos, { 0, 0, 0 }, 0.0f, false };
@@ -41,7 +84,6 @@ int main() {
     while (!WindowShouldClose()) {
         float dt = GetFrameTime();
 
-        // Stream up to 3 new chunks per frame, unload distant ones
         world.Update(player.position);
 
         // --- Mouse look ---
@@ -104,18 +146,18 @@ int main() {
             ClearBackground(SKYBLUE);
             BeginMode3D(camera);
                 world.Render(player.position, 120.0f, 100.0f);
-                // Large water plane centered on player to always cover horizon
                 DrawPlane({ player.position.x, 10.0f, player.position.z },
                           { 10000, 10000 }, { 0, 121, 241, 150 });
             EndMode3D();
 
             DrawFPS(10, 10);
+            DrawText(TextFormat("Seed: %u", seed), 10, 40, 20, WHITE);
             DrawText(TextFormat("Speed: %.1f km/h",
-                Vector3Length({ player.velocity.x, 0, player.velocity.z }) * 3.6f), 10, 40, 20, WHITE);
-            DrawText(TextFormat("Chunks loaded: %d", world.ChunkCount()), 10, 70, 20, WHITE);
+                Vector3Length({ player.velocity.x, 0, player.velocity.z }) * 3.6f), 10, 70, 20, WHITE);
+            DrawText(TextFormat("Chunks loaded: %d", world.ChunkCount()), 10, 100, 20, WHITE);
             DrawText(TextFormat("Pos: %.0f / %.1f / %.0f",
-                player.position.x, player.position.y, player.position.z), 10, 100, 20, WHITE);
-            DrawText("WASD + mouse | SHIFT sprint | SPACE jump", 10, 130, 20, WHITE);
+                player.position.x, player.position.y, player.position.z), 10, 130, 20, WHITE);
+            DrawText("WASD + mouse | SHIFT sprint | SPACE jump", 10, 160, 20, WHITE);
         EndDrawing();
     }
 
