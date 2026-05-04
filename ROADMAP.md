@@ -48,11 +48,13 @@ keepRadius = 6   →  ~13×13 = 169 чанків максимум в пам'ят
 
 ---
 
-## Фаза 4 — Асинхронна генерація [TODO]
-- Worker-потоки будують `mesh.vertices/normals/colors` у RAM
-- Main thread: тільки `UploadMesh` + `LoadModelFromMesh` (OpenGL = тільки main)
-- Стани чанка: `Empty → Generating → ReadyForUpload → Ready`
-- Усуває мікрозависання при перетині меж чанків
+## Фаза 4 — Асинхронна генерація [РЕАЛІЗОВАНО]
+- `BuildChunkCPU` — тільки RAM, безпечна для будь-якого потоку
+- Thread pool з 2 воркерами (`std::thread` + `std::mutex` + `std::condition_variable`)
+- `workQueue` → воркер → `uploadQueue` → main thread (`UploadMesh` + `LoadModelFromMesh`)
+- `inFlight` set запобігає дублюванню задач
+- `maxUpload=2` чанки на кадр → без мікрозависань при перетині меж
+- `ChunkManager::Shutdown()` коректно зупиняє потоки до `CloseWindow()`
 
 ---
 

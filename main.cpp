@@ -161,6 +161,7 @@ int main(int argc, char** argv) {
         EndDrawing();
     }
 
+    world.Shutdown();
     treeAssets.Unload();
     CloseWindow();
     return 0;

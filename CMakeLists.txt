@@ -28,10 +28,12 @@ FetchContent_Declare(
 # Use the recommended way for modern CMake
 FetchContent_MakeAvailable(raylib)
 
+find_package(Threads REQUIRED)
+
 add_executable(game main.cpp)
 
 # Link Raylib and ensure include directories are propagated
-target_link_libraries(game PUBLIC raylib)
+target_link_libraries(game PUBLIC raylib Threads::Threads)
 
 # Explicitly add the include directory from the fetched source
 target_include_directories(game PUBLIC ${raylib_SOURCE_DIR}/src)
