@@ -5,8 +5,7 @@
 #include <vector>
 #include <cmath>
 
-constexpr int CHUNK_SIZE  = 32;
-constexpr int CHUNK_VERTS = CHUNK_SIZE + 1;  // 33×33 vertices per chunk
+constexpr int CHUNK_SIZE = 32;
 
 struct TreeData {
     Vector3 pos;       // base position on the ground
@@ -51,15 +50,30 @@ inline Chunk BuildChunk(const PerlinNoise& pn, int cx, int cz) {
     const float ox = (float)(cx * CHUNK_SIZE);
     const float oz = (float)(cz * CHUNK_SIZE);
 
-    // Precompute CHUNK_VERTS×CHUNK_VERTS height grid (stack, ~4 KB)
-    float hmap[CHUNK_VERTS * CHUNK_VERTS];
-    for (int i = 0; i < CHUNK_VERTS; i++)
-        for (int j = 0; j < CHUNK_VERTS; j++)
-            hmap[i * CHUNK_VERTS + j] = SampleWorldHeight(pn, ox + i, oz + j);
+    // Extended height grid: sample [-1, CHUNK_SIZE+1] so border vertices can
+    // compute smooth normals that match the adjacent chunk — fixes seams.
+    constexpr int HW = CHUNK_SIZE + 3;  // 35×35
+    float hmap[HW * HW];
+    for (int i = 0; i < HW; i++)
+        for (int j = 0; j < HW; j++)
+            hmap[i * HW + j] = SampleWorldHeight(pn, ox + i - 1, oz + j - 1);
 
-    auto H = [&](int i, int j) { return hmap[i * CHUNK_VERTS + j]; };
+    // H(i,j) with i,j in [-1, CHUNK_SIZE+1]
+    auto H = [&](int i, int j) { return hmap[(i+1) * HW + (j+1)]; };
 
-    // Build mesh (flat-shaded, indexed by triangle)
+    // Smooth normal via central differences — deterministic across chunk borders
+    const Vector3 kLight = Vector3Normalize({ 0.5f, 1.0f, 0.2f });
+    auto SmoothN = [&](int i, int j) -> Vector3 {
+        return Vector3Normalize({ H(i-1,j) - H(i+1,j), 2.0f, H(i,j-1) - H(i,j+1) });
+    };
+
+    auto VertColor = [](float y) -> Color {
+        if      (y > 60.0f) return WHITE;
+        else if (y > 40.0f) return GRAY;
+        else if (y < 12.0f) return BEIGE;
+        else                return DARKGREEN;
+    };
+
     Mesh& mesh = c.mesh;
     mesh.triangleCount = CHUNK_SIZE * CHUNK_SIZE * 2;
     mesh.vertexCount   = mesh.triangleCount * 3;
@@ -68,46 +82,30 @@ inline Chunk BuildChunk(const PerlinNoise& pn, int cx, int cz) {
     mesh.colors   = (unsigned char *)MemAlloc(mesh.vertexCount * 4 * sizeof(unsigned char));
 
     int vi = 0;
-    for (int x = 0; x < CHUNK_SIZE; x++) {
+    auto AddV = [&](int gx, int gz) {
+        float wy    = H(gx, gz);
+        Vector3 n   = SmoothN(gx, gz);
+        float light = Vector3DotProduct(n, kLight);
+        if (light < 0.3f) light = 0.3f;
+        Color col = VertColor(wy);
+        mesh.vertices[vi*3]   = ox + gx;
+        mesh.vertices[vi*3+1] = wy;
+        mesh.vertices[vi*3+2] = oz + gz;
+        mesh.normals[vi*3]    = n.x;
+        mesh.normals[vi*3+1]  = n.y;
+        mesh.normals[vi*3+2]  = n.z;
+        mesh.colors[vi*4]     = (unsigned char)(col.r * light);
+        mesh.colors[vi*4+1]   = (unsigned char)(col.g * light);
+        mesh.colors[vi*4+2]   = (unsigned char)(col.b * light);
+        mesh.colors[vi*4+3]   = 255;
+        vi++;
+    };
+
+    for (int x = 0; x < CHUNK_SIZE; x++)
         for (int z = 0; z < CHUNK_SIZE; z++) {
-            float wx = ox + x, wz = oz + z;
-            Vector3 v1 = { wx,     H(x,   z  ), wz     };
-            Vector3 v2 = { wx + 1, H(x+1, z  ), wz     };
-            Vector3 v3 = { wx,     H(x,   z+1), wz + 1 };
-            Vector3 v4 = { wx + 1, H(x+1, z+1), wz + 1 };
-
-            auto AddTri = [&](Vector3 p1, Vector3 p2, Vector3 p3) {
-                Vector3 n = Vector3Normalize(Vector3CrossProduct(
-                    Vector3Subtract(p2, p1), Vector3Subtract(p3, p1)));
-                Vector3 pts[3] = { p1, p2, p3 };
-                for (int i = 0; i < 3; i++) {
-                    mesh.vertices[vi*3]   = pts[i].x;
-                    mesh.vertices[vi*3+1] = pts[i].y;
-                    mesh.vertices[vi*3+2] = pts[i].z;
-                    mesh.normals[vi*3]   = n.x;
-                    mesh.normals[vi*3+1] = n.y;
-                    mesh.normals[vi*3+2] = n.z;
-
-                    float light = Vector3DotProduct(n, Vector3Normalize({ 0.5f, 1.0f, 0.2f }));
-                    if (light < 0.3f) light = 0.3f;
-
-                    Color col = DARKGREEN;
-                    if      (pts[i].y > 60.0f) col = WHITE;
-                    else if (pts[i].y > 40.0f) col = GRAY;
-                    else if (pts[i].y < 12.0f) col = BEIGE;
-
-                    mesh.colors[vi*4]   = (unsigned char)(col.r * light);
-                    mesh.colors[vi*4+1] = (unsigned char)(col.g * light);
-                    mesh.colors[vi*4+2] = (unsigned char)(col.b * light);
-                    mesh.colors[vi*4+3] = 255;
-                    vi++;
-                }
-            };
-
-            AddTri(v1, v3, v2);
-            AddTri(v2, v3, v4);
+            AddV(x,   z  ); AddV(x,   z+1); AddV(x+1, z  );
+            AddV(x+1, z  ); AddV(x,   z+1); AddV(x+1, z+1);
         }
-    }
 
     UploadMesh(&mesh, false);
     c.model = LoadModelFromMesh(mesh);
