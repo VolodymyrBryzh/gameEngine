@@ -6,8 +6,18 @@
 #include <cmath>
 #include <cstdint>
 #include <fstream>
+#include <ctime>
 #include <string>
-#include <filesystem>
+#include "biomes.h"
+
+#ifdef _WIN32
+  #include <direct.h>
+  #define MKDIR(p) _mkdir(p)
+#else
+  #include <sys/stat.h>
+  #define MKDIR(p) mkdir(p, 0777)
+#endif
+
 
 constexpr int CHUNK_SIZE = 32;
 
@@ -19,6 +29,7 @@ struct TreeData {
     float   trunkR;
     int     hp;
     bool    fallen;
+    TreeType type;
 };
 struct RockData { Vector3 pos; float radius; };
 
@@ -43,19 +54,29 @@ struct Chunk {
     }
 };
 
-inline float SampleWorldHeight(const PerlinNoise& pn, float x, float z) {
+inline float SampleWorldHeight(const PerlinNoise& pn, float x, float z, const BiomeParams& bp) {
     float warpX = pn.fbm(x * 0.005f,        z * 0.005f,        3) * 2.0f - 1.0f;
     float warpZ = pn.fbm(x * 0.005f + 5.2f, z * 0.005f + 1.3f, 3) * 2.0f - 1.0f;
     const float W = 25.0f;
-    return pn.fbm((x + warpX * W) * 0.01f, (z + warpZ * W) * 0.01f, 6) * 80.0f;
+    float h = pn.fbm((x + warpX * W) * 0.01f * bp.noiseFreq, 
+                     (z + warpZ * W) * 0.01f * bp.noiseFreq, 6);
+    return h * 80.0f * bp.heightScale + bp.heightOffset;
 }
+
+inline float SampleWorldHeight(const PerlinNoise& pn, float x, float z) {
+    BiomeType bt = GetBiome(pn, x, z);
+    return SampleWorldHeight(pn, x, z, GetBiomeParams(bt));
+}
+
+
 
 inline std::string GetChunkDeltaPath(int cx, int cz) {
     return "save/chunks/" + std::to_string(cx) + "_" + std::to_string(cz) + ".bin";
 }
 
 inline void SaveChunkDelta(int cx, int cz, const std::vector<TreeData>& trees) {
-    std::filesystem::create_directories("save/chunks");
+    MKDIR("save");
+    MKDIR("save/chunks");
     std::ofstream f(GetChunkDeltaPath(cx, cz), std::ios::binary);
     if (!f.is_open()) return;
 
@@ -123,10 +144,17 @@ inline ChunkBuildResult BuildChunkCPU(const PerlinNoise& pn, int cx, int cz, int
     // Extended heightmap: covers [-2, CHUNK_SIZE+2] so central-difference normals
     // are correct at borders for both step=1 and step=2.
     constexpr int HW = CHUNK_SIZE + 5;  // 37×37
-    float hmap[HW * HW];
-    for (int i = 0; i < HW; i++)
-        for (int j = 0; j < HW; j++)
-            hmap[i * HW + j] = SampleWorldHeight(pn, ox + i - 2, oz + j - 2);
+    struct PointData { float h; BiomeType bt; };
+    PointData hmap[HW * HW];
+    for (int i = 0; i < HW; i++) {
+        for (int j = 0; j < HW; j++) {
+            float wx = ox + i - 2;
+            float wz = oz + j - 2;
+            BiomeType bt = GetBiome(pn, wx, wz);
+            BiomeParams bp = GetBiomeParams(bt);
+            hmap[i * HW + j] = { SampleWorldHeight(pn, wx, wz, bp), bt };
+        }
+    }
 
     // H(i,j) with i,j in [-2, CHUNK_SIZE+2]
     auto H = [&](int i, int j) { return hmap[(i+2) * HW + (j+2)]; };
@@ -136,16 +164,27 @@ inline ChunkBuildResult BuildChunkCPU(const PerlinNoise& pn, int cx, int cz, int
     auto SmoothN = [&](int i, int j) -> Vector3 {
         float fs = (float)step;
         return Vector3Normalize({
-            H(i-step, j) - H(i+step, j),
+            H(i-step, j).h - H(i+step, j).h,
             2.0f * fs,
-            H(i, j-step) - H(i, j+step)
+            H(i, j-step).h - H(i, j+step).h
         });
     };
-    auto VertColor = [](float y) -> Color {
-        if      (y > 60.0f) return WHITE;
-        else if (y > 40.0f) return GRAY;
-        else if (y < 12.0f) return BEIGE;
-        else                return DARKGREEN;
+    auto VertColor = [](float y, BiomeType bt) -> Color {
+        BiomeParams bp = GetBiomeParams(bt);
+        Color base = bp.color;
+        if (bt == MOUNTAINS && y > 60.0f) return WHITE; // Snow peaks
+        if (bt == FOREST && y < 12.0f) return BEIGE;    // Sand beach
+        
+        float factor = (y + 20.0f) / 100.0f;
+        if (factor < 0.6f) factor = 0.6f;
+        if (factor > 1.2f) factor = 1.2f;
+
+        return {
+            (unsigned char)fmin(255, base.r * factor),
+            (unsigned char)fmin(255, base.g * factor),
+            (unsigned char)fmin(255, base.b * factor),
+            255
+        };
     };
 
     int cells = CHUNK_SIZE / step;          // 32 or 16
@@ -160,11 +199,12 @@ inline ChunkBuildResult BuildChunkCPU(const PerlinNoise& pn, int cx, int cz, int
 
     int vi = 0;
     auto AddV = [&](int gx, int gz) {
-        float wy    = H(gx, gz);
+        PointData pd = H(gx, gz);
+        float wy    = pd.h;
         Vector3 n   = SmoothN(gx, gz);
         float light = Vector3DotProduct(n, kLight);
         if (light < 0.3f) light = 0.3f;
-        Color col = VertColor(wy);
+        Color col = VertColor(wy, pd.bt);
         mesh.vertices[vi*3]   = ox + gx;
         mesh.vertices[vi*3+1] = wy;
         mesh.vertices[vi*3+2] = oz + gz;
@@ -211,11 +251,13 @@ inline ChunkBuildResult BuildChunkCPU(const PerlinNoise& pn, int cx, int cz, int
         }
     };
     auto SkirtQuad = [&](int gx1, int gz1, int gx2, int gz2, bool flip) {
-        Vector3 a    = { ox + gx1, H(gx1, gz1),                oz + gz1 };
-        Vector3 b    = { ox + gx2, H(gx2, gz2),                oz + gz2 };
+        PointData pd1 = H(gx1, gz1);
+        PointData pd2 = H(gx2, gz2);
+        Vector3 a    = { ox + gx1, pd1.h,                oz + gz1 };
+        Vector3 b    = { ox + gx2, pd2.h,                oz + gz2 };
         Vector3 aBot = { a.x,      a.y - SKIRT_DEPTH,          a.z      };
         Vector3 bBot = { b.x,      b.y - SKIRT_DEPTH,          b.z      };
-        Color  col   = VertColor((a.y + b.y) * 0.5f);
+        Color  col   = VertColor((a.y + b.y) * 0.5f, pd1.bt);
         if (flip) { AddSkirtTri(a, aBot, bBot, col); AddSkirtTri(a, bBot, b,    col); }
         else      { AddSkirtTri(a, bBot, aBot, col); AddSkirtTri(a, b,    bBot, col); }
     };
@@ -234,19 +276,22 @@ inline ChunkBuildResult BuildChunkCPU(const PerlinNoise& pn, int cx, int cz, int
         const int GRID = 7;
         for (int gx = 0; gx < CHUNK_SIZE; gx += GRID) {
             for (int gz = 0; gz < CHUNK_SIZE; gz += GRID) {
-                float density = pn.noise((ox+gx) * 0.08f, (oz+gz) * 0.08f);
-                float jx = (pn.noise((ox+gx)*0.4f, (oz+gz)*0.1f) - 0.5f) * GRID * 0.9f;
-                float jz = (pn.noise((ox+gx)*0.1f, (oz+gz)*0.4f) - 0.5f) * GRID * 0.9f;
-                float px = ox + gx + jx;
-                float pz = oz + gz + jz;
-                float h  = SampleWorldHeight(pn, px, pz);
+                float px = ox + gx + (pn.noise((ox+gx)*0.4f, (oz+gz)*0.1f) - 0.5f) * GRID * 0.9f;
+                float pz = oz + gz + (pn.noise((ox+gx)*0.1f, (oz+gz)*0.4f) - 0.5f) * GRID * 0.9f;
+                
+                BiomeType   bt = GetBiome(pn, px, pz);
+                BiomeParams bp = GetBiomeParams(bt);
+                float h  = SampleWorldHeight(pn, px, pz, bp);
 
-                if (h >= 12.0f && h <= 38.0f && density > 0.55f) {
+                float density = pn.noise(px * 0.08f, pz * 0.08f);
+                if (density < bp.treeDensity && h > 10.0f && h < 60.0f) {
                     float scale = 0.7f + pn.noise(px*0.2f, pz*0.2f) * 0.8f;
                     float rot   = pn.noise(px*0.5f, pz*0.7f) * 2.0f * PI;
-                    r.trees.push_back({ {px,h,pz}, scale, rot,
-                        3.0f*scale, 0.20f*scale, 100, false });
-                } else if (h > 8.0f && h <= 55.0f && density < 0.18f) {
+                    TreeType tt = OAK;
+                    if (bt == TUNDRA || bt == MOUNTAINS) tt = SPRUCE;
+                    if (bt == DESERT) tt = CACTUS;
+                    r.trees.push_back({ {px,h,pz}, scale, rot, 3.0f*scale, 0.20f*scale, 100, false, tt });
+                } else if (density > 1.0f - bp.rockDensity) {
                     float s = 0.4f + pn.noise(px*0.3f, pz*0.3f) * 0.5f;
                     r.rocks.push_back({ {px,h,pz}, 0.5f*s });
                 }

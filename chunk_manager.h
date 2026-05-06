@@ -225,10 +225,12 @@ public:
                 if (t.fallen) continue;
                 float dx = t.pos.x - playerPos.x, dz = t.pos.z - playerPos.z;
                 if (dx*dx + dz*dz > td2) continue;
-                if (treeAssets)
-                    DrawModelEx(treeAssets->model, t.pos,
-                                {0,1,0}, RAD2DEG * t.rotation,
-                                {t.scale,t.scale,t.scale}, WHITE);
+                if (treeAssets) {
+                    Model m = treeAssets->oak;
+                    if (t.type == SPRUCE) m = treeAssets->spruce;
+                    if (t.type == CACTUS) m = treeAssets->cactus;
+                    DrawModelEx(m, t.pos, {0,1,0}, RAD2DEG * t.rotation, {t.scale,t.scale,t.scale}, WHITE);
+                }
             }
 
             for (const auto& r : c.rocks) {

@@ -9,7 +9,13 @@
 #include <cstdlib>
 #include <ctime>
 #include <fstream>
-#include <filesystem>
+#ifdef _WIN32
+  #include <direct.h>
+  #define MKDIR(p) _mkdir(p)
+#else
+  #include <sys/stat.h>
+  #define MKDIR(p) mkdir(p, 0777)
+#endif
 
 struct Player {
     Vector3 position;
@@ -32,7 +38,7 @@ static uint32_t LoadOrCreateSeed(int argc, char** argv) {
 }
 
 static void SaveSeed(uint32_t seed) {
-    std::filesystem::create_directories("save");
+    MKDIR("save");
     std::ofstream f(SAVE_FILE);
     f << seed;
 }
