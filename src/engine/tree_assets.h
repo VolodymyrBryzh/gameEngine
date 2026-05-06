@@ -90,15 +90,22 @@ inline Mesh BuildMesh(TreeType type) {
         }
     }
 
-    Mesh mesh = {};
+    Mesh mesh = { 0 };
+    memset(&mesh, 0, sizeof(Mesh)); // Ensure absolute zero for all fields (VBOs, etc)
+    
     mesh.vertexCount = (int)verts.size()/3;
     mesh.triangleCount = mesh.vertexCount/3;
-    mesh.vertices = (float*)MemAlloc(verts.size()*sizeof(float));
-    mesh.normals  = (float*)MemAlloc(norms.size()*sizeof(float));
-    mesh.colors   = (unsigned char*)MemAlloc(cols.size());
+    mesh.vertices = (float*)MemAlloc((unsigned int)(verts.size()*sizeof(float)));
+    mesh.normals  = (float*)MemAlloc((unsigned int)(norms.size()*sizeof(float)));
+    
+    if (cols.size() > 0) {
+        mesh.colors = (unsigned char*)MemAlloc((unsigned int)cols.size());
+        memcpy(mesh.colors, cols.data(), cols.size());
+    }
+
     memcpy(mesh.vertices, verts.data(), verts.size()*sizeof(float));
     memcpy(mesh.normals, norms.data(), norms.size()*sizeof(float));
-    memcpy(mesh.colors, cols.data(), cols.size());
+    
     UploadMesh(&mesh, false);
     return mesh;
 }

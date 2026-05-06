@@ -274,4 +274,24 @@ public:
         }
         return false;
     }
+
+    TreeData* PickTree(Ray ray, float maxDist = 100.0f) {
+        float minDist = maxDist;
+        TreeData* targetTree = nullptr;
+
+        for (auto& [k, c] : chunks) {
+            if (c.lod != 0) continue;
+            for (auto& t : c.trees) {
+                if (t.fallen) continue;
+                RayCollision col = GetRayCollisionSphere(ray, 
+                    { t.pos.x, t.pos.y + t.trunkH * 0.5f, t.pos.z }, t.trunkH * 0.5f + 0.2f);
+                
+                if (col.hit && col.distance < minDist) {
+                    minDist = col.distance;
+                    targetTree = &t;
+                }
+            }
+        }
+        return targetTree;
+    }
 };

@@ -9,6 +9,7 @@
 #include <cstdlib>
 #include <ctime>
 #include <fstream>
+
 #ifdef _WIN32
   #include <direct.h>
   #define MKDIR(p) _mkdir(p)
@@ -43,7 +44,6 @@ static void SaveSeed(uint32_t seed) {
     f << seed;
 }
 
-// Spiral outward from origin until a green tile (h 12..38) is found.
 static Vector3 FindGreenStart(const PerlinNoise& pn) {
     const float TWO_PI = 2.0f * PI;
     for (int r = 0; r <= 512; r += 16) {
@@ -65,7 +65,7 @@ int main(int argc, char** argv) {
     SaveSeed(seed);
 
     SetConfigFlags(FLAG_MSAA_4X_HINT);
-    InitWindow(1280, 720, "Survival Engine | Infinite Procedural World");
+    InitWindow(1280, 720, "Survival Game");
 
     PerlinNoise  pn(seed);
     ChunkManager world(pn);
@@ -79,8 +79,8 @@ int main(int argc, char** argv) {
     Player   player = { startPos, { 0, 0, 0 }, 0.0f, false };
     Camera3D camera = { {}, {}, { 0, 1, 0 }, 60.0f, CAMERA_PERSPECTIVE };
 
-    float walkSpeed    = 1.39f;   // 5 km/h
-    float sprintSpeed  = 4.17f;   // 15 km/h
+    float walkSpeed    = 1.39f;
+    float sprintSpeed  = 4.17f;
     float bobbingTimer = 0.0f;
     float pitch = 0.0f, yaw = 0.0f;
 
@@ -89,17 +89,14 @@ int main(int argc, char** argv) {
 
     while (!WindowShouldClose()) {
         float dt = GetFrameTime();
-
-        world.Update(player.position);
-
-        // --- Mouse look ---
+        
+        // --- Input ---
         Vector2 md = GetMouseDelta();
         yaw   -= md.x * 0.003f;
         pitch -= md.y * 0.003f;
         if (pitch >  1.5f) pitch =  1.5f;
         if (pitch < -1.5f) pitch = -1.5f;
 
-        // --- Movement ---
         bool sprinting = IsKeyDown(KEY_LEFT_SHIFT);
         float speed    = sprinting ? sprintSpeed : walkSpeed;
 
@@ -109,7 +106,7 @@ int main(int argc, char** argv) {
         if (IsKeyDown(KEY_W)) moveDir = Vector3Add(moveDir, forward);
         if (IsKeyDown(KEY_S)) moveDir = Vector3Subtract(moveDir, forward);
         if (IsKeyDown(KEY_A)) moveDir = Vector3Add(moveDir, right);
-        if (IsKeyDown(KEY_D)) moveDir = Vector3Subtract(moveDir, right);
+        if (IsKeyDown(KEY_D)) moveDir = Vector3Add(moveDir, right);
 
         if (Vector3Length(moveDir) > 0) {
             moveDir = Vector3Normalize(moveDir);
@@ -122,6 +119,7 @@ int main(int argc, char** argv) {
             bobbingTimer = Lerp(bobbingTimer, 0, dt * 5.0f);
         }
 
+        // --- Physics ---
         player.position.x += player.velocity.x * dt;
         player.position.z += player.velocity.z * dt;
         world.ApplyTreeCollision(player.position);
@@ -129,8 +127,6 @@ int main(int argc, char** argv) {
         player.position.y += player.velocityY;
 
         float ground = world.GetHeight(player.position.x, player.position.z);
-        float bob    = sinf(bobbingTimer) * 0.15f;
-
         if (player.position.y < ground + 2.0f) {
             player.position.y = ground + 2.0f;
             player.velocityY  = 0;
@@ -141,6 +137,7 @@ int main(int argc, char** argv) {
 
         if (IsKeyPressed(KEY_SPACE) && player.isGrounded) player.velocityY = 0.25f;
 
+        float bob = sinf(bobbingTimer) * 0.15f;
         camera.position = { player.position.x, player.position.y + bob, player.position.z };
         camera.target   = {
             camera.position.x + sinf(yaw),
@@ -148,32 +145,24 @@ int main(int argc, char** argv) {
             camera.position.z + cosf(yaw)
         };
         
-        // --- Interaction ---
         if (IsMouseButtonPressed(MOUSE_LEFT_BUTTON)) {
             Vector3 dir = Vector3Subtract(camera.target, camera.position);
             dir = Vector3Normalize(dir);
             world.TryHitTree(camera.position, dir);
         }
+        
+        world.Update(player.position);
 
         BeginDrawing();
             ClearBackground(SKYBLUE);
             BeginMode3D(camera);
                 world.Render(player.position, 120.0f, 100.0f);
-                DrawPlane({ player.position.x, 10.0f, player.position.z },
-                          { 10000, 10000 }, { 0, 121, 241, 150 });
+                DrawPlane({ player.position.x, 10.0f, player.position.z }, { 10000, 10000 }, { 0, 121, 241, 150 });
             EndMode3D();
 
-            DrawFPS(10, 10);
-            DrawText(TextFormat("Seed: %u", seed), 10, 40, 20, WHITE);
-            DrawText(TextFormat("Speed: %.1f km/h",
-                Vector3Length({ player.velocity.x, 0, player.velocity.z }) * 3.6f), 10, 70, 20, WHITE);
-            DrawText(TextFormat("Chunks loaded: %d", world.ChunkCount()), 10, 100, 20, WHITE);
-            DrawText(TextFormat("Pos: %.0f / %.1f / %.0f",
-                player.position.x, player.position.y, player.position.z), 10, 130, 20, WHITE);
-            DrawText("WASD + mouse | SHIFT sprint | SPACE jump | LMB hit tree", 10, 160, 20, WHITE);
-            
-            // Crosshair
             DrawCircle(GetScreenWidth()/2, GetScreenHeight()/2, 2, WHITE);
+            DrawFPS(10, 10);
+            DrawText(TextFormat("Pos: %.0f, %.0f", player.position.x, player.position.z), 10, 40, 20, WHITE);
         EndDrawing();
     }
 
