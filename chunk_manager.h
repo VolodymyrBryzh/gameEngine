@@ -89,7 +89,10 @@ public:
                 uploadQueue.pop();
             }
         }
-        for (auto& [k, c] : chunks) c.Unload();
+        for (auto& [k, c] : chunks) {
+            if (c.dirty) SaveChunkDelta(c.cx, c.cz, c.trees);
+            c.Unload();
+        }
         chunks.clear();
     }
 
@@ -196,6 +199,7 @@ public:
         for (auto it = chunks.begin(); it != chunks.end(); ) {
             Chunk& c = it->second;
             if (abs(c.cx-pcx) > keepRadius || abs(c.cz-pcz) > keepRadius) {
+                if (c.dirty) SaveChunkDelta(c.cx, c.cz, c.trees);
                 inFlight.erase(Key(c.cx, c.cz));
                 c.Unload();
                 it = chunks.erase(it);
@@ -236,4 +240,36 @@ public:
     }
 
     int ChunkCount() const { return (int)chunks.size(); }
+
+    bool TryHitTree(Vector3 origin, Vector3 dir, float maxDist = 4.0f) {
+        float minDist = maxDist;
+        TreeData* targetTree = nullptr;
+        Chunk*    targetChunk = nullptr;
+
+        for (auto& [k, c] : chunks) {
+            if (c.lod != 0) continue;
+            for (auto& t : c.trees) {
+                if (t.fallen) continue;
+                // Approximate tree as a vertical line segment from t.pos to t.pos.y + t.trunkH
+                // and check distance from ray to it.
+                Ray ray = { origin, dir };
+                RayCollision col = GetRayCollisionSphere(ray, 
+                    { t.pos.x, t.pos.y + t.trunkH * 0.5f, t.pos.z }, t.trunkH * 0.5f);
+                
+                if (col.hit && col.distance < minDist) {
+                    minDist = col.distance;
+                    targetTree = &t;
+                    targetChunk = &c;
+                }
+            }
+        }
+
+        if (targetTree) {
+            targetTree->hp -= 25;
+            if (targetTree->hp <= 0) targetTree->fallen = true;
+            targetChunk->dirty = true;
+            return true;
+        }
+        return false;
+    }
 };

@@ -4,6 +4,10 @@
 #include "perlin_noise.h"
 #include <vector>
 #include <cmath>
+#include <cstdint>
+#include <fstream>
+#include <string>
+#include <filesystem>
 
 constexpr int CHUNK_SIZE = 32;
 
@@ -32,6 +36,7 @@ struct Chunk {
     std::vector<TreeData> trees;
     std::vector<RockData> rocks;
     bool ready = false;
+    bool dirty = false;
 
     void Unload() {
         if (ready) { UnloadModel(model); ready = false; }
@@ -43,6 +48,64 @@ inline float SampleWorldHeight(const PerlinNoise& pn, float x, float z) {
     float warpZ = pn.fbm(x * 0.005f + 5.2f, z * 0.005f + 1.3f, 3) * 2.0f - 1.0f;
     const float W = 25.0f;
     return pn.fbm((x + warpX * W) * 0.01f, (z + warpZ * W) * 0.01f, 6) * 80.0f;
+}
+
+inline std::string GetChunkDeltaPath(int cx, int cz) {
+    return "save/chunks/" + std::to_string(cx) + "_" + std::to_string(cz) + ".bin";
+}
+
+inline void SaveChunkDelta(int cx, int cz, const std::vector<TreeData>& trees) {
+    std::filesystem::create_directories("save/chunks");
+    std::ofstream f(GetChunkDeltaPath(cx, cz), std::ios::binary);
+    if (!f.is_open()) return;
+
+    uint32_t magic = 0x544C4443; // 'CDLT'
+    uint32_t ver   = 1;
+    
+    std::vector<uint32_t> dirtyIndices;
+    for (size_t i = 0; i < trees.size(); i++) {
+        // We consider it "changed" if hp < 100 or fallen. 
+        // This is a simple heuristic since base generation always has hp=100, fallen=false.
+        if (trees[i].hp < 100 || trees[i].fallen) {
+            dirtyIndices.push_back((uint32_t)i);
+        }
+    }
+
+    uint32_t count = (uint32_t)dirtyIndices.size();
+    f.write((char*)&magic, 4);
+    f.write((char*)&ver,   4);
+    f.write((char*)&count, 4);
+
+    for (uint32_t idx : dirtyIndices) {
+        f.write((char*)&idx, 4);
+        f.write((char*)&trees[idx].hp, 4);
+        uint8_t fallen = trees[idx].fallen ? 1 : 0;
+        f.write((char*)&fallen, 1);
+    }
+}
+
+inline void LoadChunkDelta(int cx, int cz, std::vector<TreeData>& trees) {
+    std::ifstream f(GetChunkDeltaPath(cx, cz), std::ios::binary);
+    if (!f.is_open()) return;
+
+    uint32_t magic, ver, count;
+    f.read((char*)&magic, 4);
+    if (magic != 0x544C4443) return;
+    f.read((char*)&ver, 4);
+    f.read((char*)&count, 4);
+
+    for (uint32_t i = 0; i < count; i++) {
+        uint32_t idx;
+        int hp;
+        uint8_t fallen;
+        f.read((char*)&idx, 4);
+        f.read((char*)&hp, 4);
+        f.read((char*)&fallen, 1);
+        if (idx < trees.size()) {
+            trees[idx].hp = hp;
+            trees[idx].fallen = (fallen != 0);
+        }
+    }
 }
 
 // CPU-only build — safe to call from worker threads.
@@ -189,6 +252,7 @@ inline ChunkBuildResult BuildChunkCPU(const PerlinNoise& pn, int cx, int cz, int
                 }
             }
         }
+        LoadChunkDelta(cx, cz, r.trees);
     }
 
     return r;

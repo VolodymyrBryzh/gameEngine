@@ -141,6 +141,13 @@ int main(int argc, char** argv) {
             camera.position.y + sinf(pitch),
             camera.position.z + cosf(yaw)
         };
+        
+        // --- Interaction ---
+        if (IsMouseButtonPressed(MOUSE_LEFT_BUTTON)) {
+            Vector3 dir = Vector3Subtract(camera.target, camera.position);
+            dir = Vector3Normalize(dir);
+            world.TryHitTree(camera.position, dir);
+        }
 
         BeginDrawing();
             ClearBackground(SKYBLUE);
@@ -157,7 +164,10 @@ int main(int argc, char** argv) {
             DrawText(TextFormat("Chunks loaded: %d", world.ChunkCount()), 10, 100, 20, WHITE);
             DrawText(TextFormat("Pos: %.0f / %.1f / %.0f",
                 player.position.x, player.position.y, player.position.z), 10, 130, 20, WHITE);
-            DrawText("WASD + mouse | SHIFT sprint | SPACE jump", 10, 160, 20, WHITE);
+            DrawText("WASD + mouse | SHIFT sprint | SPACE jump | LMB hit tree", 10, 160, 20, WHITE);
+            
+            // Crosshair
+            DrawCircle(GetScreenWidth()/2, GetScreenHeight()/2, 2, WHITE);
         EndDrawing();
     }
 
